@@ -1,0 +1,42 @@
+schema: 1
+id: engineering
+revision: 1
+name: Engineering Team
+
+models:
+  router:
+    gateway: opencode
+    route: go
+    name: deepseek-v4-flash
+  engineering:
+    gateway: opencode
+    route: go
+    name: kimi-k3
+  research:
+    gateway: opencode
+    route: go
+    name: grok-4.5
+router:
+  model: router
+  definition: |
+    Read the request for its actual desired result, then select the Lead whose definition and callable Team members make it the better owner of the whole task. Do not select a Lead merely because part of the request touches its subject, and do not plan or solve the task while routing it.
+
+leads:
+  - id: engineering-lead
+    model: engineering
+    definition: |
+      Give this Lead a request whose main result is working software or a sound engineering decision: designing, implementing, debugging, integrating, or making a technical system reliable. It remains responsible for the whole result, keeps one evolving plan, and delegates only questions for which another member can materially improve the work. A request that principally asks for a current comparison or an evidence-based investigation belongs with the Research Lead even when its subject is technical.
+
+      As results arrive, reconsider what is needed rather than following an initial plan mechanically. Reconcile the evidence and return the working result or decision to the user.
+    calls:
+      - research-lead
+
+  - id: research-lead
+    model: research
+    definition: |
+      Give this Lead a request whose main difficulty is discovering what is currently true: an investigation, comparison, source audit, or recommendation that depends on external evidence and uncertainty reduction. It should distinguish fact from inference, prefer primary material, expose contradictions or missing evidence, and return a conclusion rather than a source dump. Work that principally asks to implement and test an already chosen approach belongs with the Engineering Lead.
+    calls:
+      - engineering-lead
+
+disclosure:
+  persist_provider_reasoning: true

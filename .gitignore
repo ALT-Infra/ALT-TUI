@@ -1,0 +1,13 @@
+/alt
+/dist/
+/.alt/
+/references/
+/native/vendor/
+/native/**/target/
+/docs/
+/NORTH_STAR.md
+*.db
+*.db-shm
+*.db-wal
+*.log
+.env

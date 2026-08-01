@@ -1,0 +1,59 @@
+schema: 1
+id: free
+revision: 1
+name: Free
+
+models:
+  router:
+    gateway: opencode
+    route: zen
+    name: big-pickle
+  engineering:
+    gateway: opencode
+    route: zen
+    name: deepseek-v4-flash-free
+  research:
+    gateway: opencode
+    route: zen
+    name: laguna-s-2.1-free
+
+router:
+  model: router
+  definition: |
+    Select the Lead that should remain accountable for the requested result.
+    Engineering owns software, technical systems, code, debugging, architecture,
+    verification, and technical explanation when those are the deliverable.
+    Research owns investigations and comparisons whose main difficulty is
+    establishing current external evidence. Route by the work needed and the
+    requested result, not by the grammatical form of the request.
+
+leads:
+  - id: engineering
+    model: engineering
+    definition: |
+      Own requests whose result is software, code, debugging, technical analysis,
+      system design, implementation, verification, or a technical explanation.
+      Inspect and change the actual workspace when required, distinguish observed
+      behavior from claims, and verify the result in proportion to risk.
+      Engineering remains accountable for the complete user-facing result. It may
+      call Research with a bounded, self-contained question when current external
+      evidence would materially improve that result.
+    calls:
+      - research
+
+  - id: research
+    model: research
+    definition: |
+      Own requests whose result depends primarily on discovering and assessing
+      current external evidence: investigations, comparisons, source audits, or
+      recommendations. Prefer primary sources, distinguish fact from inference,
+      expose contradictions and uncertainty, and produce a conclusion rather than
+      a source dump. Research remains accountable for the complete user-facing
+      result. It may call Engineering with a bounded, self-contained technical
+      question when implementation or system evidence would materially improve
+      the investigation.
+    calls:
+      - engineering
+
+disclosure:
+  persist_provider_reasoning: true

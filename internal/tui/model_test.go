@@ -1031,13 +1031,13 @@ func TestResumeUsesCodexFullScreenSessionBrowser(t *testing.T) {
 		page: store.SessionPage{Items: []store.Session{
 			{
 				ID: "turn-1", ConversationID: "conversation-1",
-				Title: "Repair process recovery", Workspace: "/workspace/ALT-chat",
+				Title: "Repair process recovery", Workspace: "/workspace/ALT-TUI",
 				ProfileID: "free", ProfileRevision: 1, Status: store.SessionCompleted,
 				UpdatedAt: reference.Add(-42 * time.Second),
 			},
 			{
 				ID: "turn-2", ConversationID: "conversation-2",
-				Title: "Inspect graph layout", Workspace: "/workspace/ALT-chat",
+				Title: "Inspect graph layout", Workspace: "/workspace/ALT-TUI",
 				ProfileID: "free", ProfileRevision: 1, Status: store.SessionFailed,
 				UpdatedAt: reference.Add(-35 * time.Minute),
 			},

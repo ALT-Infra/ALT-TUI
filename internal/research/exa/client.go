@@ -87,7 +87,7 @@ func (c Client) request(ctx context.Context, path string, payload any) (map[stri
 	}
 	request.Header.Set("content-type", "application/json")
 	request.Header.Set("x-api-key", credential)
-	request.Header.Set("user-agent", "ALT-chat")
+	request.Header.Set("user-agent", "ALT-TUI")
 	client := c.HTTPClient
 	if client == nil {
 		client = http.DefaultClient

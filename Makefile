@@ -4,7 +4,7 @@ LDFLAGS := -s -w -X altv1/internal/buildinfo.Version=$(VERSION)
 NATIVE_MANIFEST := native/gui/Cargo.toml
 NATIVE_LIBRARY := native/gui/target/release/libalt_native_gui.a
 CARGO_HOME_PATH := $(shell sh -c 'printf "%s" "$${CARGO_HOME:-$${HOME}/.cargo}"')
-RUST_REMAP_FLAGS := --remap-path-prefix=$(CURDIR)=/src/ALT-chat --remap-path-prefix=$(CARGO_HOME_PATH)=/cargo
+RUST_REMAP_FLAGS := --remap-path-prefix=$(CURDIR)=/src/ALT-TUI --remap-path-prefix=$(CARGO_HOME_PATH)=/cargo
 
 .PHONY: test test-go test-native native linux licenses embedded-bwrap clean
 

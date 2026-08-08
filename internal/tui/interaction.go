@@ -29,7 +29,7 @@ func (m Model) submit(queue bool) (tea.Model, tea.Cmd) {
 		return m.handleCommand(value)
 	}
 	if m.profile == nil {
-		m.composerNotice = "Choose a Team with /profile, or create one with /team new, before sending."
+		m.composerNotice = "Choose a Team with /profile, or create one with /team, before sending."
 		m.status = "ready"
 		m.updateLayout()
 		return m, nil

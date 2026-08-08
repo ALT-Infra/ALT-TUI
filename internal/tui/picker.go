@@ -111,9 +111,7 @@ func (m *Model) openCommandPalette() {
 		pickerItem{kind: "command", reference: "/new", title: "New session", description: "Clear the current view"},
 		pickerItem{kind: "command", reference: "/resume", title: "Resume session", description: "Search durable conversation history"},
 		pickerItem{kind: "command", reference: "/profile", title: "Choose Team Profile", description: "Search immutable profile revisions"},
-		pickerItem{kind: "command", reference: "/team", title: "Inspect team", description: "Show distinct models, definitions, Lead eligibility, and call edges"},
-		pickerItem{kind: "command", reference: "/team new", title: "Create Team", description: "Open the native Team graph builder"},
-		pickerItem{kind: "command", reference: "/team edit", title: "Edit Team", description: "Open the selected Team as a mutable draft"},
+		pickerItem{kind: "command", reference: "/team", title: "Team", description: "Create, edit, or inspect a Team in one graph window"},
 		pickerItem{kind: "command", reference: "/auth", title: "Configure connection", description: "Store a gateway or Exa API key with hidden input"},
 		pickerItem{kind: "command", reference: "/rename", title: "Rename session", description: "Give the active session a memorable title"},
 		pickerItem{kind: "command", reference: "/copy", title: "Copy last response", description: "Copy the last answer as Markdown"},
@@ -257,11 +255,15 @@ func (m Model) profilePickerView(width int) string {
 func (m *Model) openGateways(items []provider.GatewayDescriptor) {
 	values := make([]list.Item, 0, len(items)+1)
 	for _, item := range items {
+		description := item.ID + " · store or replace API key"
+		if item.Authentication == provider.AuthenticationDeviceOAuth {
+			description = item.ID + " · sign in with account"
+		}
 		values = append(values, pickerItem{
 			kind:        "gateway",
 			reference:   item.ID,
 			title:       item.Name,
-			description: item.ID + " · store or replace credential",
+			description: description,
 		})
 	}
 	values = append(values, pickerItem{

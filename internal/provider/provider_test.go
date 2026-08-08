@@ -66,20 +66,20 @@ func TestAuthenticatedCatalogControlsIdentityAndCapabilities(t *testing.T) {
 	if err := registry.Register(catalogGateway{}); err != nil {
 		t.Fatal(err)
 	}
-	value := profile.Profile{Models: map[string]profile.Model{
-		"member": {Gateway: "gateway", Route: "serverless", Name: "exact/model"},
+	value := profile.Profile{Gateway: "gateway", Models: map[string]profile.Model{
+		"member": {Route: "serverless", Name: "exact/model"},
 	}}
 	if err := registry.ValidateProfile(context.Background(), value); err != nil {
 		t.Fatal(err)
 	}
-	capabilities := registry.Capabilities(value.Models["member"])
+	capabilities := registry.Capabilities(value.Gateway, value.Models["member"])
 	if capabilities.StructuredOutput != CapabilitySupported ||
 		capabilities.ToolCalling != CapabilityUnsupported {
 		t.Fatalf("catalog capabilities were not preserved: %#v", capabilities)
 	}
 	changed := value
 	changed.Models = map[string]profile.Model{
-		"member": {Gateway: "gateway", Route: "serverless", Name: "rewritten-model"},
+		"member": {Route: "serverless", Name: "rewritten-model"},
 	}
 	err := registry.ValidateProfile(context.Background(), changed)
 	if err == nil || !strings.Contains(err.Error(), "will not substitute") {

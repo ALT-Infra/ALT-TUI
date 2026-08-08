@@ -11,6 +11,7 @@ import (
 	"altv1/internal/credential"
 	"altv1/internal/orchestrator"
 	"altv1/internal/provider"
+	"altv1/internal/provider/cline"
 	"altv1/internal/provider/fireworks"
 	"altv1/internal/provider/opencode"
 	"altv1/internal/provider/together"
@@ -110,6 +111,7 @@ func NewGatewayRegistry(dataDir string) (*provider.Registry, error) {
 	registry := provider.NewRegistry()
 	credentials := credential.NewStore(dataDir)
 	gateways := []provider.Gateway{
+		cline.NewFactory(credentials),
 		fireworks.NewFactory(credentials),
 		opencode.NewFactory(credentials),
 		together.NewFactory(credentials),

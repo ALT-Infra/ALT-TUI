@@ -55,9 +55,8 @@ func TestCompletionRequestLeavesEndpointOutputLimitUnset(t *testing.T) {
 	factory.HTTPClient = &http.Client{Transport: transport}
 
 	chat, err := factory.NewChatModel(context.Background(), profile.Model{
-		Gateway: Name,
-		Route:   ZenRoute,
-		Name:    "opencode/test-model",
+		Route: ZenRoute,
+		Name:  "opencode/test-model",
 	}, provider.Text)
 	if err != nil {
 		t.Fatal(err)

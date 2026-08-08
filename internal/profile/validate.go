@@ -41,14 +41,14 @@ func Validate(p Profile) []Diagnostic {
 	if strings.TrimSpace(p.Name) == "" {
 		add(Error, "name", "is required")
 	}
+	if strings.TrimSpace(p.Gateway) == "" {
+		add(Error, "gateway", "select an authenticated gateway")
+	}
 	if len(p.Models) == 0 {
 		add(Error, "models", "at least one model is required")
 	}
 	for alias, model := range p.Models {
 		validateID(&out, "models."+alias, alias)
-		if strings.TrimSpace(model.Gateway) == "" {
-			add(Error, "models."+alias+".gateway", "is required")
-		}
 		if strings.TrimSpace(model.Route) == "" {
 			add(Error, "models."+alias+".route", "is required")
 		}
@@ -127,9 +127,27 @@ func Validate(p Profile) []Diagnostic {
 				add(Error, path, "duplicates another callable member")
 			}
 			callIDs[id] = true
-			_, ok := p.Member(id)
-			if !ok {
-				add(Error, path, "references unknown Team member "+id)
+			if leadIDs[id] {
+				add(Error, path, "references a Lead; callable specialists and Leads are exclusive roles")
+			} else if _, ok := p.Member(id); !ok {
+				add(Error, path, "references unknown specialist "+id)
+			}
+		}
+		peerIDs := map[string]bool{}
+		for j, id := range lead.Peers {
+			path := fmt.Sprintf("leads[%d].peers[%d]", i, j)
+			validateID(&out, path, id)
+			if id == lead.ID {
+				add(Error, path, "a Lead cannot peer with itself")
+			}
+			if peerIDs[id] {
+				add(Error, path, "duplicates another peer relationship")
+			}
+			peerIDs[id] = true
+			if leadIDs[id] {
+				add(Error, path, "references a Lead; peer contributors and Leads are exclusive roles")
+			} else if _, ok := p.Member(id); !ok {
+				add(Error, path, "references unknown specialist "+id)
 			}
 		}
 	}
@@ -139,9 +157,12 @@ func Validate(p Profile) []Diagnostic {
 			for _, calledID := range lead.Calls {
 				used = used || calledID == id
 			}
+			for _, peerID := range lead.Peers {
+				used = used || peerID == id
+			}
 		}
 		if !used {
-			add(Warning, "members."+id, "is not callable by any Lead")
+			add(Warning, "members."+id, "is neither callable nor available as a peer to any Lead")
 		}
 	}
 

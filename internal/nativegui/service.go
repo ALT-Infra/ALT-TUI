@@ -12,6 +12,7 @@ import (
 	"altv1/internal/event"
 	"altv1/internal/profile"
 	"altv1/internal/provider"
+	"altv1/internal/store"
 	"altv1/internal/thinking"
 )
 
@@ -33,51 +34,51 @@ type Host struct {
 	published   *Published
 	initError   string
 	streamError string
+	teamView    TeamView
+	profiles    []store.ProfileSummary
 
 	preparedRequest  []byte
 	preparedResponse []byte
 }
 
+func (h *Host) loadCatalog(gateway string) error {
+	gateway = strings.ToLower(strings.TrimSpace(gateway))
+	if _, err := h.app.Providers.Descriptor(gateway); err != nil {
+		return err
+	}
+	items, err := h.app.Providers.Catalog(h.ctx, gateway)
+	if err != nil {
+		return err
+	}
+	h.catalog = items
+	return nil
+}
+
 func NewHost(ctx context.Context, app *application.Application, launch Launch) (*Host, error) {
 	host := &Host{ctx: ctx, app: app, launch: launch}
 	switch launch.Mode {
-	case ModeTeamNew, ModeTeamEdit:
-		var catalogErrors []string
-		for _, gateway := range app.Providers.Descriptors() {
-			items, err := app.Providers.Catalog(ctx, gateway.ID)
-			if err != nil {
-				catalogErrors = append(catalogErrors, err.Error())
-				continue
-			}
-			host.catalog = append(host.catalog, items...)
+	case ModeTeam:
+		profiles, err := app.Store.ListProfiles(ctx)
+		if err != nil {
+			return nil, err
 		}
-		if len(host.catalog) == 0 && len(catalogErrors) > 0 {
-			host.initError = strings.Join(catalogErrors, "; ")
-		}
-		if launch.Mode == ModeTeamNew {
+		host.profiles = profiles
+		if launch.ProfileID == "" {
 			draft := NewDraft()
 			host.draft = &draft
+			host.teamView = TeamViewNew
 		} else {
-			if launch.ProfileID == "" {
-				return nil, fmt.Errorf("team edit requires a profile id")
-			}
 			document, err := app.Store.Profile(ctx, launch.ProfileID, launch.Revision)
 			if err != nil {
 				return nil, err
 			}
+			if err := host.loadCatalog(document.Profile.Gateway); err != nil {
+				host.initError = err.Error()
+			}
 			draft := DraftFromProfile(document.Profile, host.catalog)
 			host.draft = &draft
+			host.teamView = TeamViewInspect
 		}
-	case ModeTeamInspect:
-		if launch.ProfileID == "" {
-			return nil, fmt.Errorf("team inspector requires a profile id")
-		}
-		document, err := app.Store.Profile(ctx, launch.ProfileID, launch.Revision)
-		if err != nil {
-			return nil, err
-		}
-		draft := DraftFromProfile(document.Profile, nil)
-		host.draft = &draft
 	case ModeThinking:
 		if launch.SessionID == "" {
 			return nil, fmt.Errorf("thinking graph requires a session")
@@ -158,8 +159,11 @@ func (h *Host) exchange(request Request) Response {
 	switch request.Operation {
 	case "init":
 		initial := &InitialState{
-			Mode:    h.launch.Mode,
-			Catalog: append([]provider.CatalogModel(nil), h.catalog...),
+			Mode:     h.launch.Mode,
+			View:     h.teamView,
+			Catalog:  append([]provider.CatalogModel(nil), h.catalog...),
+			Gateways: append([]provider.GatewayDescriptor(nil), h.app.Providers.Descriptors()...),
+			Profiles: append([]store.ProfileSummary(nil), h.profiles...),
 			Runtime: RuntimeCapabilities{
 				DangerouslyBypassApprovalsAndSandbox: h.app.RuntimePolicy.DangerouslyBypassApprovalsAndSandbox,
 				FilesystemConfinement:                h.app.RuntimePolicy.FilesystemConfinement,
@@ -176,12 +180,68 @@ func (h *Host) exchange(request Request) Response {
 		if h.thinking != nil {
 			initial.Thinking = h.thinking
 		}
-		if h.initError != "" {
-			return Response{OK: false, Error: h.initError, Initial: initial}
+		return Response{OK: true, Error: h.initError, Initial: initial}
+	case "team.open":
+		if h.launch.Mode != ModeTeam {
+			return Response{OK: false, Error: "team surface is not active"}
 		}
-		return Response{OK: true, Initial: initial}
+		view := request.View
+		if view == TeamViewNew {
+			draft := NewDraft()
+			h.draft = &draft
+			h.catalog = nil
+			h.initError = ""
+			h.teamView = view
+			return h.exchange(Request{Operation: "init"})
+		}
+		if view != TeamViewEdit && view != TeamViewInspect {
+			return Response{OK: false, Error: "unknown Team view " + string(view)}
+		}
+		if request.ProfileID == "" {
+			return Response{OK: false, Error: "choose a Team revision first"}
+		}
+		document, err := h.app.Store.Profile(h.ctx, request.ProfileID, request.Revision)
+		if err != nil {
+			return Response{OK: false, Error: err.Error()}
+		}
+		if err := h.loadCatalog(document.Profile.Gateway); err != nil {
+			h.initError = err.Error()
+		} else {
+			h.initError = ""
+		}
+		draft := DraftFromProfile(document.Profile, h.catalog)
+		h.draft = &draft
+		h.teamView = view
+		return h.exchange(Request{Operation: "init"})
+	case "team.gateway":
+		if h.launch.Mode != ModeTeam || h.teamView == TeamViewInspect {
+			return Response{OK: false, Error: "team inspection is read-only"}
+		}
+		gateway := strings.ToLower(strings.TrimSpace(request.Gateway))
+		if gateway == "" {
+			return Response{OK: false, Error: "choose a gateway account first"}
+		}
+		if err := h.loadCatalog(gateway); err != nil {
+			return Response{OK: false, Error: err.Error()}
+		}
+		if request.Draft != nil {
+			copy := *request.Draft
+			h.draft = &copy
+		} else if h.draft == nil {
+			draft := NewDraft()
+			h.draft = &draft
+		}
+		if h.draft.Gateway != gateway {
+			h.draft.Gateway = gateway
+			h.draft.Router.Model = ModelChoice{}
+			for index := range h.draft.Members {
+				h.draft.Members[index].Model = ModelChoice{}
+			}
+		}
+		h.initError = ""
+		return h.exchange(Request{Operation: "init"})
 	case "team.validate":
-		if h.launch.Mode != ModeTeamNew && h.launch.Mode != ModeTeamEdit {
+		if h.launch.Mode != ModeTeam || h.teamView == TeamViewInspect {
 			return Response{OK: false, Error: "team inspection is read-only"}
 		}
 		if request.Draft == nil {
@@ -190,7 +250,7 @@ func (h *Host) exchange(request Request) Response {
 		diagnostics := DiagnosticsForDraft(*request.Draft, h.catalog)
 		return Response{OK: !hasErrors(diagnostics), Diagnostics: diagnostics}
 	case "team.publish":
-		if h.launch.Mode != ModeTeamNew && h.launch.Mode != ModeTeamEdit {
+		if h.launch.Mode != ModeTeam || h.teamView == TeamViewInspect {
 			return Response{OK: false, Error: "team inspection is read-only"}
 		}
 		if request.Draft == nil {

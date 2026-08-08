@@ -30,6 +30,18 @@ type Delegation struct {
 	Error       string
 }
 
+type PeerTurn struct {
+	Spec        event.PeerTurnSpec
+	Status      DelegationStatus
+	Attempt     int
+	Interrupted bool
+	Result      string
+	Findings    []string
+	Risks       []string
+	Confidence  float64
+	Error       string
+}
+
 type Projection struct {
 	SessionID           string
 	Task                string
@@ -40,6 +52,7 @@ type Projection struct {
 	LeadBasis           string
 	LeadTurns           int
 	Delegations         map[string]*Delegation
+	PeerTurns           map[string]*PeerTurn
 	FinalAnswer         string
 	Terminal            bool
 	Failed              bool
@@ -69,7 +82,7 @@ type ConversationTrace struct {
 }
 
 func Replay(sessionID string, events []event.Event) (*Projection, error) {
-	state := &Projection{SessionID: sessionID, Delegations: make(map[string]*Delegation)}
+	state := &Projection{SessionID: sessionID, Delegations: make(map[string]*Delegation), PeerTurns: make(map[string]*PeerTurn)}
 	for _, item := range events {
 		if err := state.Apply(item); err != nil {
 			return nil, err
@@ -167,6 +180,48 @@ func (p *Projection) Apply(item event.Event) error {
 			delegation.Status = DelegationCancelled
 			delegation.Interrupted = false
 		}
+	case event.PeerTurnCreated:
+		data, err := event.Decode[event.PeerTurnSpec](item)
+		if err != nil {
+			return err
+		}
+		spec := data
+		p.PeerTurns[data.ID] = &PeerTurn{Spec: spec, Status: DelegationPending}
+	case event.PeerTurnStarted:
+		data, err := event.Decode[event.PeerTurnStartedData](item)
+		if err != nil {
+			return err
+		}
+		if turn := p.PeerTurns[data.PeerTurnID]; turn != nil {
+			turn.Status, turn.Attempt, turn.Interrupted, turn.Error = DelegationRunning, data.Attempt, false, ""
+		}
+	case event.PeerTurnCompleted:
+		data, err := event.Decode[event.PeerTurnCompletedData](item)
+		if err != nil {
+			return err
+		}
+		if turn := p.PeerTurns[data.PeerTurnID]; turn != nil {
+			turn.Status, turn.Attempt, turn.Result = DelegationCompleted, data.Attempt, data.Result
+			turn.Findings, turn.Risks, turn.Confidence = append([]string(nil), data.Findings...), append([]string(nil), data.Risks...), data.Confidence
+			turn.Interrupted, turn.Error = false, ""
+		}
+	case event.PeerTurnFailed:
+		data, err := event.Decode[event.PeerTurnFailedData](item)
+		if err != nil {
+			return err
+		}
+		if turn := p.PeerTurns[data.PeerTurnID]; turn != nil {
+			turn.Status, turn.Attempt, turn.Error = DelegationFailed, data.Attempt, data.Error
+			turn.Interrupted = item.Actor == "recovery"
+		}
+	case event.PeerTurnCancelled:
+		data, err := event.Decode[event.PeerTurnCancelledData](item)
+		if err != nil {
+			return err
+		}
+		if turn := p.PeerTurns[data.PeerTurnID]; turn != nil {
+			turn.Status, turn.Interrupted = DelegationCancelled, false
+		}
 	case event.ModelCallStarted:
 		p.ModelCalls++
 	case event.ModelUsage:
@@ -204,10 +259,24 @@ func (p *Projection) SortedDelegations() []*Delegation {
 	return result
 }
 
+func (p *Projection) SortedPeerTurns() []*PeerTurn {
+	result := make([]*PeerTurn, 0, len(p.PeerTurns))
+	for _, turn := range p.PeerTurns {
+		result = append(result, turn)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Spec.ID < result[j].Spec.ID })
+	return result
+}
+
 func (p *Projection) ActiveCount() int {
 	count := 0
 	for _, delegation := range p.Delegations {
 		if delegation.Status == DelegationPending || delegation.Status == DelegationRunning {
+			count++
+		}
+	}
+	for _, turn := range p.PeerTurns {
+		if turn.Status == DelegationPending || turn.Status == DelegationRunning {
 			count++
 		}
 	}
@@ -229,7 +298,33 @@ func (p *Projection) WorkCount() int {
 			}
 		}
 	}
+	for _, turn := range p.PeerTurns {
+		switch turn.Status {
+		case DelegationPending, DelegationRunning:
+			count++
+		case DelegationFailed:
+			if turn.Interrupted {
+				count++
+			}
+		}
+	}
 	return count
+}
+
+func (p *Projection) CollaborationTurns(collaborationID string) []*PeerTurn {
+	var result []*PeerTurn
+	for _, turn := range p.PeerTurns {
+		if turn.Spec.CollaborationID == collaborationID {
+			result = append(result, turn)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Spec.Round != result[j].Spec.Round {
+			return result[i].Spec.Round < result[j].Spec.Round
+		}
+		return result[i].Spec.ID < result[j].Spec.ID
+	})
+	return result
 }
 
 func (p *Projection) DependenciesCompleted(spec event.DelegationSpec) bool {

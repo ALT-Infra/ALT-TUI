@@ -21,23 +21,29 @@ func TestDraftRoundTripPreservesDefinitionsAndLeadCallEdges(t *testing.T) {
 	leadDefinition := "Own implementation.\nDo not rewrite this user's punctuation:  !!"
 	researchDefinition := "Establish external evidence and return sources.\n\tKeep this tab."
 	draft := TeamDraft{
-		ID:   "exact-team",
-		Name: "Exact Team",
+		Gateway: "opencode",
+		ID:      "exact-team",
+		Name:    "Exact Team",
 		Router: DraftAssignment{
 			Model: choice(catalog[0]), Definition: routerDefinition,
 		},
 		Members: []DraftMember{
 			{
 				ID: "engineering", Model: choice(catalog[1]),
-				Definition: leadDefinition, Lead: true,
+				Definition: leadDefinition,
 			},
 			{
 				ID: "research", Model: choice(catalog[2]),
-				Definition: researchDefinition, Lead: true,
+				Definition: researchDefinition,
+			},
+			{
+				ID: "specialist", Model: choice(catalog[3]),
+				Definition: "Return bounded specialist findings.",
 			},
 		},
+		RouterEdges: []string{"engineering", "research"},
 		CallEdges: []DraftCallEdge{{
-			LeadID: "research", MemberID: "engineering",
+			LeadID: "research", MemberID: "specialist",
 		}},
 	}
 	if diagnostics := DiagnosticsForDraft(draft, catalog); hasErrors(diagnostics) {
@@ -47,7 +53,7 @@ func TestDraftRoundTripPreservesDefinitionsAndLeadCallEdges(t *testing.T) {
 	if value.Router.Definition != routerDefinition {
 		t.Fatalf("router definition changed: %q", value.Router.Definition)
 	}
-	if len(value.Leads) != 2 || len(value.Members) != 0 {
+	if len(value.Leads) != 2 || len(value.Members) != 1 {
 		t.Fatalf("roles were not represented once per assignment: %#v", value)
 	}
 	if value.Leads[0].Definition != leadDefinition ||
@@ -61,11 +67,11 @@ func TestDraftRoundTripPreservesDefinitionsAndLeadCallEdges(t *testing.T) {
 	for _, member := range roundTrip.Members {
 		switch member.ID {
 		case "engineering":
-			if !member.Lead || member.Definition != leadDefinition {
+			if member.Definition != leadDefinition || !contains(roundTrip.RouterEdges, member.ID) {
 				t.Fatalf("callable Lead changed: %#v", member)
 			}
 		case "research":
-			if !member.Lead || member.Definition != researchDefinition {
+			if member.Definition != researchDefinition || !contains(roundTrip.RouterEdges, member.ID) {
 				t.Fatalf("research member changed: %#v", member)
 			}
 		}
@@ -75,24 +81,26 @@ func TestDraftRoundTripPreservesDefinitionsAndLeadCallEdges(t *testing.T) {
 func TestDraftRejectsDisappearedModelWithoutSubstitution(t *testing.T) {
 	catalog := testCatalog()
 	draft := TeamDraft{
-		ID:   "missing-model-team",
-		Name: "Missing Model Team",
+		Gateway: "opencode",
+		ID:      "missing-model-team",
+		Name:    "Missing Model Team",
 		Router: DraftAssignment{
 			Model: choice(catalog[0]), Definition: strings.Repeat("router ", 10),
 		},
 		Members: []DraftMember{
 			{
 				ID: "first", Model: choice(catalog[1]),
-				Definition: strings.Repeat("first ", 10), Lead: true,
+				Definition: strings.Repeat("first ", 10),
 			},
 			{
 				ID: "second",
 				Model: ModelChoice{
-					Gateway: "opencode", Route: "zen", ID: "removed-model",
+					Route: "zen", ID: "removed-model",
 				},
-				Definition: strings.Repeat("second ", 10), Lead: true,
+				Definition: strings.Repeat("second ", 10),
 			},
 		},
+		RouterEdges: []string{"first", "second"},
 	}
 	diagnostics := DiagnosticsForDraft(draft, catalog)
 	if !hasErrors(diagnostics) {
@@ -150,7 +158,7 @@ func TestTeamInspectorLoadsExactRevisionAndRejectsBackendMutation(t *testing.T) 
 	}
 
 	host, err := NewHost(ctx, app, Launch{
-		Mode:      ModeTeamInspect,
+		Mode:      ModeTeam,
 		ProfileID: document.Profile.ID,
 		Revision:  document.Profile.Revision,
 	})
@@ -161,8 +169,8 @@ func TestTeamInspectorLoadsExactRevisionAndRejectsBackendMutation(t *testing.T) 
 	if !initial.OK || initial.Initial == nil || initial.Initial.Draft == nil {
 		t.Fatalf("inspect init failed: %#v", initial)
 	}
-	if initial.Initial.Mode != ModeTeamInspect {
-		t.Fatalf("mode = %q, want %q", initial.Initial.Mode, ModeTeamInspect)
+	if initial.Initial.Mode != ModeTeam || initial.Initial.View != TeamViewInspect {
+		t.Fatalf("mode/view = %q/%q, want Team/Inspect", initial.Initial.Mode, initial.Initial.View)
 	}
 	if initial.Initial.Draft.BaseRevision != document.Profile.Revision {
 		t.Fatalf(
@@ -236,7 +244,8 @@ func TestPushedThinkingEventRepairsDroppedSequenceFromLedger(t *testing.T) {
 	defer ledger.Close()
 	catalog := testCatalog()
 	draft := TeamDraft{
-		ID: "team", Name: "Team",
+		Gateway: "opencode",
+		ID:      "team", Name: "Team",
 		Router: DraftAssignment{
 			Model: choice(catalog[0]), Definition: strings.Repeat("route ", 10),
 		},
@@ -244,15 +253,13 @@ func TestPushedThinkingEventRepairsDroppedSequenceFromLedger(t *testing.T) {
 			{
 				ID: "first", Model: choice(catalog[1]),
 				Definition: strings.Repeat("first ", 10),
-				Lead:       true,
 			},
 			{
 				ID: "second", Model: choice(catalog[2]),
 				Definition: strings.Repeat("second ", 10),
-				Lead:       true,
 			},
 		},
-		CallEdges: []DraftCallEdge{{LeadID: "second", MemberID: "first"}},
+		RouterEdges: []string{"first", "second"},
 	}
 	value := draft.Profile()
 	value.Revision = 1
@@ -311,20 +318,22 @@ func TestThinkingHostKeepsLaterTurnsInTheSameSessionProjection(t *testing.T) {
 	}
 	defer ledger.Close()
 	value := TeamDraft{
-		ID: "team", Name: "Team",
+		Gateway: "opencode",
+		ID:      "team", Name: "Team",
 		Router: DraftAssignment{
 			Model: choice(testCatalog()[0]), Definition: strings.Repeat("route ", 10),
 		},
 		Members: []DraftMember{
 			{
 				ID: "lead", Model: choice(testCatalog()[1]),
-				Definition: strings.Repeat("own engineering outcomes ", 4), Lead: true,
+				Definition: strings.Repeat("own engineering outcomes ", 4),
 			},
 			{
 				ID: "research", Model: choice(testCatalog()[2]),
-				Definition: strings.Repeat("own evidence investigations ", 4), Lead: true,
+				Definition: strings.Repeat("own evidence investigations ", 4),
 			},
 		},
+		RouterEdges: []string{"lead", "research"},
 	}.Profile()
 	value.Revision = 1
 	document, err := profile.FromValue(value)
@@ -385,18 +394,30 @@ func testCatalog() []provider.CatalogModel {
 		{
 			Gateway: "opencode", Route: "zen", ID: "mimo-v2.5-free",
 		},
+		{
+			Gateway: "opencode", Route: "zen", ID: "specialist-model",
+		},
 	}
 }
 
 func choice(item provider.CatalogModel) ModelChoice {
 	return ModelChoice{
-		Gateway: item.Gateway, Route: item.Route, ID: item.ID,
+		Route: item.Route, ID: item.ID,
 	}
 }
 
 func hasPath(values []Diagnostic, path string) bool {
 	for _, item := range values {
 		if item.Path == path {
+			return true
+		}
+	}
+	return false
+}
+
+func contains(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
 			return true
 		}
 	}

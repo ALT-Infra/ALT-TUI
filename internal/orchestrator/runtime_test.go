@@ -122,6 +122,87 @@ func TestAdaptiveParallelAndSequentialLanes(t *testing.T) {
 	}
 }
 
+func TestPeerCollaborationIsStatefulScopedAndLeadAccountable(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	ledger, err := store.OpenMemory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+
+	factory := &peerScenarioFactory{}
+	registry := provider.NewRegistry()
+	if err := registry.Register(factory); err != nil {
+		t.Fatal(err)
+	}
+	document, err := profile.Parse([]byte(testProfile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := NewEngine(ledger, registry).Start(ctx, document, "Reconcile a difficult recovery design with a research peer.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run.Wait(ctx); err != nil {
+		logEvents(t, ledger, run.SessionID)
+		t.Fatal(err)
+	}
+
+	session, err := ledger.Session(ctx, run.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.FinalAnswer != "The Lead's accountable synthesis." {
+		t.Fatalf("final answer = %q", session.FinalAnswer)
+	}
+	items, err := ledger.Events(ctx, run.SessionID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var created []event.PeerTurnSpec
+	for _, item := range items {
+		if item.Kind != event.PeerTurnCreated {
+			continue
+		}
+		spec, decodeErr := event.Decode[event.PeerTurnSpec](item)
+		if decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		created = append(created, spec)
+	}
+	if len(created) != 2 {
+		logEvents(t, ledger, run.SessionID)
+		t.Fatalf("peer turns = %d, want 2", len(created))
+	}
+	if created[0].CollaborationID == "" || created[0].CollaborationID != created[1].CollaborationID {
+		t.Fatalf("collaboration ids = %q, %q", created[0].CollaborationID, created[1].CollaborationID)
+	}
+	if created[0].Round != 1 || created[1].Round != 2 {
+		t.Fatalf("rounds = %d, %d", created[0].Round, created[1].Round)
+	}
+	if !hasKindActor(items, event.PeerTurnCompleted, "research") {
+		t.Fatal("peer completion was not durably recorded")
+	}
+	if hasKindActor(items, event.FinalCompleted, "research") {
+		t.Fatal("peer was allowed to complete the user answer")
+	}
+	if !hasKindActor(items, event.FinalCompleted, "architecture-lead") {
+		t.Fatal("accountable Lead final completion missing")
+	}
+
+	prompts := factory.promptsSnapshot()
+	if len(prompts) != 2 {
+		t.Fatalf("peer prompts = %d, want 2", len(prompts))
+	}
+	if strings.Contains(prompts[0], "first-round finding") {
+		t.Fatal("first peer round received invented prior collaboration history")
+	}
+	if !strings.Contains(prompts[1], "first-round finding") || !strings.Contains(prompts[1], `"current_round": 2`) {
+		t.Fatalf("second peer round did not receive scoped first-round history:\n%s", prompts[1])
+	}
+}
+
 func TestIdleLeadDecisionRequiresExplicitCorrectionBeforeFinalization(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -539,6 +620,82 @@ type scenarioFactory struct {
 	goStartedOnce      sync.Once
 }
 
+type peerScenarioFactory struct {
+	mu      sync.Mutex
+	prompts []string
+}
+
+func (*peerScenarioFactory) Descriptor() provider.GatewayDescriptor { return testGatewayDescriptor() }
+func (*peerScenarioFactory) ListModels(context.Context) ([]provider.CatalogModel, error) {
+	return testCatalog(), nil
+}
+func (f *peerScenarioFactory) NewChatModel(_ context.Context, spec profile.Model, mode provider.Mode) (model.BaseChatModel, error) {
+	return &peerScenarioModel{factory: f, name: spec.Name, mode: mode}, nil
+}
+func (f *peerScenarioFactory) promptsSnapshot() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.prompts...)
+}
+
+type peerScenarioModel struct {
+	factory *peerScenarioFactory
+	name    string
+	mode    provider.Mode
+}
+
+func (m *peerScenarioModel) WithTools(_ []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return m, nil
+}
+func (m *peerScenarioModel) Generate(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	switch m.name {
+	case "router":
+		return response(`{"lead_id":"architecture-lead","confidence":0.99,"basis":"The architecture Lead owns the requested recovery synthesis."}`), nil
+	case "lead":
+		state := parseLeadState(input[len(input)-1].Content)
+		if len(state.PeerTurns) == 0 {
+			return response(`{"assessment":"Begin a focused collaboration.","delegations":[],"peer_turns":[{"key":"research-1","peer_id":"research","collaboration_id":"","objective":"Establish the recovery invariant.","context":"","required_tools":[]}],"cancel":[],"finalize":false,"final_brief":""}`), nil
+		}
+		if len(state.PeerTurns) == 1 && state.PeerTurns[0].Status == string(DelegationCompleted) {
+			return response(`{"assessment":"Refine the first finding in the same collaboration.","delegations":[],"peer_turns":[{"key":"research-2","peer_id":"research","collaboration_id":"` + state.PeerTurns[0].CollaborationID + `","objective":"Stress-test the invariant using the first-round result.","context":"Focus on crash boundaries.","required_tools":[]}],"cancel":[],"finalize":false,"final_brief":""}`), nil
+		}
+		if len(state.PeerTurns) == 2 && state.PeerTurns[1].Status == string(DelegationCompleted) {
+			return response(`{"assessment":"The iterative peer work is sufficient.","delegations":[],"peer_turns":[],"cancel":[],"finalize":true,"final_brief":"Synthesize both rounds."}`), nil
+		}
+		return response(`{"assessment":"Wait for the active peer round.","delegations":[],"peer_turns":[],"cancel":[],"finalize":false,"final_brief":""}`), nil
+	default:
+		return nil, errors.New("Generate is unsupported for " + m.name)
+	}
+}
+func (m *peerScenarioModel) Stream(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	switch m.name {
+	case "research":
+		prompt := input[len(input)-1].Content
+		m.factory.mu.Lock()
+		m.factory.prompts = append(m.factory.prompts, prompt)
+		round := len(m.factory.prompts)
+		m.factory.mu.Unlock()
+		result := `{"result":"first-round finding","findings":["invariant"],"risks":[],"confidence":0.8}`
+		if round == 2 {
+			result = `{"result":"second-round refinement","findings":["crash boundary"],"risks":[],"confidence":0.9}`
+		}
+		return schema.StreamReaderFromArray([]*schema.Message{{Role: schema.Assistant, Content: result}}), nil
+	case "lead":
+		for _, message := range input {
+			if strings.Contains(message.Content, "CURRENT SESSION STATE:") {
+				decision, err := m.Generate(context.Background(), []*schema.Message{message})
+				if err != nil {
+					return nil, err
+				}
+				return schema.StreamReaderFromArray([]*schema.Message{decision}), nil
+			}
+		}
+		return schema.StreamReaderFromArray([]*schema.Message{{Role: schema.Assistant, Content: "The Lead's accountable synthesis."}}), nil
+	default:
+		return nil, errors.New("Stream is unsupported for " + m.name)
+	}
+}
+
 func (*scenarioFactory) Descriptor() provider.GatewayDescriptor {
 	return testGatewayDescriptor()
 }
@@ -670,6 +827,13 @@ type leadStateView struct {
 		MemberID string `json:"member_id"`
 		Status   string `json:"status"`
 	} `json:"delegations"`
+	PeerTurns []struct {
+		ID              string `json:"id"`
+		CollaborationID string `json:"collaboration_id"`
+		PeerID          string `json:"peer_id"`
+		Round           int    `json:"round"`
+		Status          string `json:"status"`
+	} `json:"peer_turns"`
 }
 
 func (s leadStateView) byMember(id string) struct {
@@ -803,14 +967,15 @@ schema: 1
 id: test-team
 revision: 1
 name: Test Team
+gateway: opencode
 models:
-  router-model: {gateway: opencode, route: test, name: router}
-  lead-model: {gateway: opencode, route: test, name: lead}
-  alternate-model: {gateway: opencode, route: test, name: alternate}
-  security-model: {gateway: opencode, route: test, name: security}
-  persistence-model: {gateway: opencode, route: test, name: persistence}
-  go-model: {gateway: opencode, route: test, name: go}
-  research-model: {gateway: opencode, route: test, name: research}
+  router-model: {route: test, name: router}
+  lead-model: {route: test, name: lead}
+  alternate-model: {route: test, name: alternate}
+  security-model: {route: test, name: security}
+  persistence-model: {route: test, name: persistence}
+  go-model: {route: test, name: go}
+  research-model: {route: test, name: research}
 router:
   model: router-model
   definition: Select the Lead whose explicit ownership covers the requested result.
@@ -819,6 +984,7 @@ leads:
     model: lead-model
     definition: Own cross-cutting architecture decisions involving concurrency, durable recovery, authority, and implementation domains.
     calls: [security, persistence, go-runtime, research]
+    peers: [research]
   - id: alternate-lead
     model: alternate-model
     definition: Own unrelated alternative requests so the Team has a genuine routing choice.
@@ -834,11 +1000,12 @@ schema: 1
 id: tool-team
 revision: 1
 name: Tool Team
+gateway: opencode
 models:
-  router-model: {gateway: opencode, route: test, name: router}
-  lead-model: {gateway: opencode, route: test, name: lead}
-  alternate-model: {gateway: opencode, route: test, name: alternate}
-  member-model: {gateway: opencode, route: test, name: tool-member}
+  router-model: {route: test, name: router}
+  lead-model: {route: test, name: lead}
+  alternate-model: {route: test, name: alternate}
+  member-model: {route: test, name: tool-member}
 router:
   model: router-model
   definition: Select the Lead whose ownership matches the requested result.

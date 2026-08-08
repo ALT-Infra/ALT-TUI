@@ -161,7 +161,7 @@ func NewWithOptions(ctx context.Context, app *application.Application, options L
 		app:            app,
 		input:          input,
 		viewport:       view,
-		status:         "no Team selected · use /team new or /profile",
+		status:         "no Team selected · use /team or /profile",
 		currentTurn:    -1,
 		forceFollow:    true,
 		darkBackground: true,
@@ -185,7 +185,7 @@ func NewWithOptions(ctx context.Context, app *application.Application, options L
 	} else if initialPrompt != "" {
 		model.input.SetValue(initialPrompt)
 		model.input.CursorEnd()
-		model.composerNotice = "Choose a Team with /profile, or create one with /team new, before sending."
+		model.composerNotice = "Choose a Team with /profile, or create one with /team, before sending."
 	}
 	model.updateLayout()
 	model.touchTranscript(true)
@@ -567,12 +567,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		case nativegui.ModeThinking:
 			m.thinkingGUI = msg.process
 			m.status = "thinking graph opened in a separate window"
-		case nativegui.ModeTeamInspect:
-			m.teamGUI = msg.process
-			m.status = "read-only Team inspector opened in a separate window"
 		default:
 			m.teamGUI = msg.process
-			m.status = "Team graph editor opened in a separate window"
+			m.status = "Team graph opened in a separate window"
 		}
 		return m, waitNativeCmd(msg.process)
 	case nativeFinishedMsg:
@@ -604,7 +601,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		} else if msg.process.mode == nativegui.ModeThinking {
 			m.status = "thinking graph closed"
 		} else {
-			m.status = "Team editor closed without publishing"
+			m.status = "Team graph closed"
 		}
 	case infoMsg:
 		m.status = string(msg)
@@ -797,69 +794,27 @@ func (m Model) handleCommand(command string) (tea.Model, tea.Cmd) {
 		}
 		return m, cancelSessionCmd(m.ctx, m.app, m.sessionID)
 	case "/team":
-		if len(fields) >= 2 && fields[1] == "new" {
-			if len(fields) != 2 {
-				m.status = "usage: /team new"
-				return m, nil
-			}
-			if m.teamGUI != nil {
-				m.status = "a Team editor is already open"
-				return m, nil
-			}
-			m.status = "opening Team graph editor"
-			return m, launchNativeCmd(m.ctx, m.app.DataDir, m.app.RuntimePolicy.DangerouslyBypassApprovalsAndSandbox, nativegui.Launch{
-				Mode: nativegui.ModeTeamNew,
-			})
-		}
-		if len(fields) >= 2 && fields[1] == "edit" {
-			if len(fields) > 3 {
-				m.status = "usage: /team edit [id[@revision]]"
-				return m, nil
-			}
-			if m.teamGUI != nil {
-				m.status = "a Team editor is already open"
-				return m, nil
-			}
-			id := ""
-			revision := 0
-			if len(fields) == 3 {
-				var err error
-				id, revision, err = parseNativeProfileReference(fields[2])
-				if err != nil {
-					m.status = err.Error()
-					return m, nil
-				}
-			} else if m.profile != nil {
-				id = m.profile.Profile.ID
-				revision = m.profile.Profile.Revision
-			} else {
-				m.status = "select a Team or provide /team edit id[@revision]"
-				return m, nil
-			}
-			m.status = "opening Team graph editor"
-			return m, launchNativeCmd(m.ctx, m.app.DataDir, m.app.RuntimePolicy.DangerouslyBypassApprovalsAndSandbox, nativegui.Launch{
-				Mode: nativegui.ModeTeamEdit, ProfileID: id, Revision: revision,
-			})
-		}
-		if len(fields) != 1 {
-			m.status = "usage: /team, /team new, or /team edit [id[@revision]]"
-			return m, nil
-		}
-		if m.profile == nil {
-			m.status = "no Team selected · use /team new or /profile"
+		if len(fields) > 2 {
+			m.status = "usage: /team [id[@revision]]"
 			return m, nil
 		}
 		if m.teamGUI != nil {
 			m.status = "a Team window is already open"
 			return m, nil
 		}
-		m.status = "opening read-only Team inspector"
-		return m, launchNativeCmd(
-			m.ctx,
-			m.app.DataDir,
-			m.app.RuntimePolicy.DangerouslyBypassApprovalsAndSandbox,
-			selectedTeamInspectorLaunch(m.profile),
-		)
+		launch := nativegui.Launch{Mode: nativegui.ModeTeam}
+		if len(fields) == 2 {
+			id, revision, err := parseNativeProfileReference(fields[1])
+			if err != nil {
+				m.status = err.Error()
+				return m, nil
+			}
+			launch.ProfileID, launch.Revision = id, revision
+		} else if m.profile != nil {
+			launch = selectedTeamInspectorLaunch(m.profile)
+		}
+		m.status = "opening Team graph"
+		return m, launchNativeCmd(m.ctx, m.app.DataDir, m.app.RuntimePolicy.DangerouslyBypassApprovalsAndSandbox, launch)
 	case "/auth":
 		if len(fields) != 1 {
 			m.status = "usage: /auth"

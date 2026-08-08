@@ -269,10 +269,13 @@ func TestSlashCommandsDoNotSilentlyIgnoreArguments(t *testing.T) {
 	}
 }
 
-func TestTeamEditSelectionExecutesCurrentTeamWithoutForcingAnArgument(t *testing.T) {
-	definition, ok := commandDefinitionFor("/team edit")
+func TestTeamSurfaceIsOneCommandWithoutForcedArgument(t *testing.T) {
+	definition, ok := commandDefinitionFor("/team")
 	if !ok || definition.needsInput {
-		t.Fatalf("/team edit definition = %#v, %v", definition, ok)
+		t.Fatalf("/team definition = %#v, %v", definition, ok)
+	}
+	if _, obsolete := commandDefinitionFor("/team edit"); obsolete {
+		t.Fatal("obsolete split Team command remains registered")
 	}
 }
 
@@ -618,8 +621,8 @@ func TestTeamCommandTargetsPinnedRevisionInReadOnlyNativeMode(t *testing.T) {
 	defer closeApp()
 
 	launch := selectedTeamInspectorLaunch(model.profile)
-	if launch.Mode != nativegui.ModeTeamInspect {
-		t.Fatalf("mode = %q, want %q", launch.Mode, nativegui.ModeTeamInspect)
+	if launch.Mode != nativegui.ModeTeam {
+		t.Fatalf("mode = %q, want %q", launch.Mode, nativegui.ModeTeam)
 	}
 	if launch.ProfileID != model.profile.Profile.ID ||
 		launch.Revision != model.profile.Profile.Revision {
@@ -631,7 +634,7 @@ func TestTeamCommandTargetsPinnedRevisionInReadOnlyNativeMode(t *testing.T) {
 	if command == nil {
 		t.Fatal("/team did not launch the native inspector")
 	}
-	if model.status != "opening read-only Team inspector" {
+	if model.status != "opening Team graph" {
 		t.Fatalf("status = %q", model.status)
 	}
 }

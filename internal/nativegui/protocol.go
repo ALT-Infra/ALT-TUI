@@ -7,6 +7,7 @@ import (
 
 	"altv1/internal/profile"
 	"altv1/internal/provider"
+	"altv1/internal/store"
 
 	"github.com/google/uuid"
 )
@@ -14,15 +15,25 @@ import (
 type Mode string
 
 const (
-	ModeTeamNew     Mode = "team-new"
-	ModeTeamEdit    Mode = "team-edit"
-	ModeTeamInspect Mode = "team-inspect"
-	ModeThinking    Mode = "thinking"
+	ModeTeam     Mode = "team"
+	ModeThinking Mode = "thinking"
+)
+
+type TeamView string
+
+const (
+	TeamViewNew     TeamView = "new"
+	TeamViewEdit    TeamView = "edit"
+	TeamViewInspect TeamView = "inspect"
 )
 
 type Request struct {
 	Operation string     `json:"operation"`
 	Draft     *TeamDraft `json:"draft,omitempty"`
+	Gateway   string     `json:"gateway,omitempty"`
+	View      TeamView   `json:"view,omitempty"`
+	ProfileID string     `json:"profile_id,omitempty"`
+	Revision  int        `json:"revision,omitempty"`
 }
 
 type Response struct {
@@ -35,12 +46,15 @@ type Response struct {
 }
 
 type InitialState struct {
-	Mode        Mode                    `json:"mode"`
-	Runtime     RuntimeCapabilities     `json:"runtime"`
-	Catalog     []provider.CatalogModel `json:"catalog,omitempty"`
-	Draft       *TeamDraft              `json:"draft,omitempty"`
-	Thinking    any                     `json:"thinking,omitempty"`
-	Diagnostics []Diagnostic            `json:"diagnostics,omitempty"`
+	Mode        Mode                         `json:"mode"`
+	View        TeamView                     `json:"view,omitempty"`
+	Runtime     RuntimeCapabilities          `json:"runtime"`
+	Catalog     []provider.CatalogModel      `json:"catalog,omitempty"`
+	Gateways    []provider.GatewayDescriptor `json:"gateways,omitempty"`
+	Profiles    []store.ProfileSummary       `json:"profiles,omitempty"`
+	Draft       *TeamDraft                   `json:"draft,omitempty"`
+	Thinking    any                          `json:"thinking,omitempty"`
+	Diagnostics []Diagnostic                 `json:"diagnostics,omitempty"`
 }
 
 type RuntimeCapabilities struct {
@@ -64,17 +78,20 @@ type Published struct {
 }
 
 // TeamDraft is deliberately narrower than profile.Profile. It contains only
-// decisions the user owns: model assignments, Lead eligibility, call edges,
-// member identities, the Team name, and verbatim definitions. Team identity
-// and runtime execution policy remain product-owned;
+// decisions the user owns: one gateway account, model assignments, graph
+// edges, member identities, the Team name, and verbatim definitions. Team
+// identity and runtime execution policy remain product-owned;
 // gateway limits are discovered or enforced by the gateway.
 type TeamDraft struct {
 	ID           string          `json:"id"`
 	Name         string          `json:"name"`
+	Gateway      string          `json:"gateway"`
 	BaseRevision int             `json:"base_revision"`
 	Router       DraftAssignment `json:"router"`
 	Members      []DraftMember   `json:"members"`
+	RouterEdges  []string        `json:"router_edges"`
 	CallEdges    []DraftCallEdge `json:"call_edges"`
+	PeerEdges    []DraftPeerEdge `json:"peer_edges"`
 }
 
 type DraftAssignment struct {
@@ -86,7 +103,6 @@ type DraftMember struct {
 	ID         string      `json:"id"`
 	Model      ModelChoice `json:"model"`
 	Definition string      `json:"definition"`
-	Lead       bool        `json:"lead"`
 }
 
 type DraftCallEdge struct {
@@ -94,18 +110,24 @@ type DraftCallEdge struct {
 	MemberID string `json:"member_id"`
 }
 
+type DraftPeerEdge struct {
+	LeadID   string `json:"lead_id"`
+	MemberID string `json:"member_id"`
+}
+
 type ModelChoice struct {
-	Gateway string `json:"gateway"`
-	Route   string `json:"route"`
-	ID      string `json:"id"`
+	Route string `json:"route"`
+	ID    string `json:"id"`
 }
 
 func NewDraft() TeamDraft {
 	return TeamDraft{
-		ID:        "team-" + uuid.NewString(),
-		Router:    DraftAssignment{},
-		Members:   []DraftMember{},
-		CallEdges: []DraftCallEdge{},
+		ID:          "team-" + uuid.NewString(),
+		Router:      DraftAssignment{},
+		Members:     []DraftMember{},
+		RouterEdges: []string{},
+		CallEdges:   []DraftCallEdge{},
+		PeerEdges:   []DraftPeerEdge{},
 	}
 }
 
@@ -113,9 +135,10 @@ func DraftFromProfile(p profile.Profile, catalog []provider.CatalogModel) TeamDr
 	draft := TeamDraft{
 		ID:           p.ID,
 		Name:         p.Name,
+		Gateway:      p.Gateway,
 		BaseRevision: p.Revision,
 		Router: DraftAssignment{
-			Model:      choiceForModel(p.Models[p.Router.Model], catalog),
+			Model:      choiceForModel(p.Gateway, p.Models[p.Router.Model], catalog),
 			Definition: p.RouterDefinition(),
 		},
 	}
@@ -123,18 +146,18 @@ func DraftFromProfile(p profile.Profile, catalog []provider.CatalogModel) TeamDr
 	for _, lead := range p.Leads {
 		member := DraftMember{
 			ID:         lead.ID,
-			Model:      choiceForModel(p.Models[lead.Model], catalog),
+			Model:      choiceForModel(p.Gateway, p.Models[lead.Model], catalog),
 			Definition: p.LeadDefinition(lead),
-			Lead:       true,
 		}
 		draft.Members = append(draft.Members, member)
+		draft.RouterEdges = append(draft.RouterEdges, lead.ID)
 		byID[lead.ID] = len(draft.Members) - 1
 	}
 	for _, member := range p.Members {
 		if _, ok := byID[member.ID]; !ok {
 			member := DraftMember{
 				ID:         member.ID,
-				Model:      choiceForModel(p.Models[member.Model], catalog),
+				Model:      choiceForModel(p.Gateway, p.Models[member.Model], catalog),
 				Definition: p.MemberDefinition(member),
 			}
 			draft.Members = append(draft.Members, member)
@@ -144,6 +167,11 @@ func DraftFromProfile(p profile.Profile, catalog []provider.CatalogModel) TeamDr
 	for _, lead := range p.Leads {
 		for _, memberID := range lead.Calls {
 			draft.CallEdges = append(draft.CallEdges, DraftCallEdge{
+				LeadID: lead.ID, MemberID: memberID,
+			})
+		}
+		for _, memberID := range lead.Peers {
+			draft.PeerEdges = append(draft.PeerEdges, DraftPeerEdge{
 				LeadID: lead.ID, MemberID: memberID,
 			})
 		}
@@ -157,15 +185,23 @@ func DraftFromProfile(p profile.Profile, catalog []provider.CatalogModel) TeamDr
 		}
 		return draft.CallEdges[i].MemberID < draft.CallEdges[j].MemberID
 	})
+	sort.Strings(draft.RouterEdges)
+	sort.SliceStable(draft.PeerEdges, func(i, j int) bool {
+		if draft.PeerEdges[i].LeadID != draft.PeerEdges[j].LeadID {
+			return draft.PeerEdges[i].LeadID < draft.PeerEdges[j].LeadID
+		}
+		return draft.PeerEdges[i].MemberID < draft.PeerEdges[j].MemberID
+	})
 	return draft
 }
 
 func (d TeamDraft) Profile() profile.Profile {
 	value := profile.Profile{
-		Schema: profile.CurrentSchema,
-		ID:     strings.TrimSpace(d.ID),
-		Name:   strings.TrimSpace(d.Name),
-		Models: make(map[string]profile.Model),
+		Schema:  profile.CurrentSchema,
+		ID:      strings.TrimSpace(d.ID),
+		Name:    strings.TrimSpace(d.Name),
+		Gateway: strings.ToLower(strings.TrimSpace(d.Gateway)),
+		Models:  make(map[string]profile.Model),
 		Router: profile.RouterAssignment{
 			Model:      "router",
 			Definition: d.Router.Definition,
@@ -173,13 +209,17 @@ func (d TeamDraft) Profile() profile.Profile {
 	}
 	value.Models["router"] = d.Router.Model.profileModel()
 
+	leads := make(map[string]bool, len(d.RouterEdges))
+	for _, id := range d.RouterEdges {
+		leads[id] = true
+	}
 	for _, member := range d.Members {
 		id := strings.TrimSpace(member.ID)
 		if id == "" {
 			continue
 		}
 		value.Models[id] = member.Model.profileModel()
-		if member.Lead {
+		if leads[id] {
 			value.Leads = append(value.Leads, profile.LeadAssignment{
 				ID: id, Model: id, Definition: member.Definition,
 			})
@@ -194,6 +234,16 @@ func (d TeamDraft) Profile() profile.Profile {
 			if value.Leads[index].ID == edge.LeadID {
 				value.Leads[index].Calls = appendUnique(
 					value.Leads[index].Calls,
+					edge.MemberID,
+				)
+			}
+		}
+	}
+	for _, edge := range d.PeerEdges {
+		for index := range value.Leads {
+			if value.Leads[index].ID == edge.LeadID {
+				value.Leads[index].Peers = appendUnique(
+					value.Leads[index].Peers,
 					edge.MemberID,
 				)
 			}
@@ -255,11 +305,7 @@ func DiagnosticsForDraft(d TeamDraft, catalog []provider.CatalogModel) []Diagnos
 			Severity: "error", Path: "router.model", Message: "select a catalog model",
 		})
 	}
-	leadCount := 0
 	for index, member := range d.Members {
-		if member.Lead {
-			leadCount++
-		}
 		if strings.TrimSpace(member.ID) == "" {
 			result = append(result, Diagnostic{
 				Severity: "error",
@@ -275,7 +321,7 @@ func DiagnosticsForDraft(d TeamDraft, catalog []provider.CatalogModel) []Diagnos
 			})
 		}
 	}
-	if leadCount < 2 {
+	if len(uniqueStrings(d.RouterEdges)) < 2 {
 		result = append(result, Diagnostic{
 			Severity: "error", Path: "leads", Message: "ALT teams require at least two Leads",
 		})
@@ -289,7 +335,7 @@ func DiagnosticsForDraft(d TeamDraft, catalog []provider.CatalogModel) []Diagnos
 			return
 		}
 		identity := provider.CatalogIdentity(provider.CatalogModel{
-			Gateway: choice.Gateway, Route: choice.Route, ID: choice.ID,
+			Gateway: d.Gateway, Route: choice.Route, ID: choice.ID,
 		})
 		if !available[identity] {
 			result = append(result, Diagnostic{
@@ -309,6 +355,18 @@ func DiagnosticsForDraft(d TeamDraft, catalog []provider.CatalogModel) []Diagnos
 		}
 		return result[i].Path < result[j].Path
 	})
+	return result
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != "" && !seen[value] {
+			seen[value] = true
+			result = append(result, value)
+		}
+	}
 	return result
 }
 
@@ -333,28 +391,26 @@ func hasErrors(values []Diagnostic) bool {
 	return false
 }
 
-func choiceForModel(model profile.Model, catalog []provider.CatalogModel) ModelChoice {
+func choiceForModel(gateway string, model profile.Model, catalog []provider.CatalogModel) ModelChoice {
 	for _, item := range catalog {
-		if provider.CatalogIdentity(item) == profile.ModelIdentity(model) {
+		if strings.EqualFold(item.Gateway, gateway) &&
+			strings.EqualFold(item.Route, model.Route) && item.ID == model.Name {
 			return ModelChoice{
-				Gateway: item.Gateway,
-				Route:   item.Route,
-				ID:      item.ID,
+				Route: item.Route,
+				ID:    item.ID,
 			}
 		}
 	}
 	return ModelChoice{
-		Gateway: model.Gateway,
-		Route:   model.Route,
-		ID:      model.Name,
+		Route: model.Route,
+		ID:    model.Name,
 	}
 }
 
 func (m ModelChoice) profileModel() profile.Model {
 	return profile.Model{
-		Gateway: strings.ToLower(strings.TrimSpace(m.Gateway)),
-		Route:   strings.ToLower(strings.TrimSpace(m.Route)),
-		Name:    strings.TrimSpace(m.ID),
+		Route: strings.ToLower(strings.TrimSpace(m.Route)),
+		Name:  strings.TrimSpace(m.ID),
 	}
 }
 

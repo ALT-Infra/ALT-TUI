@@ -22,7 +22,7 @@ func (r *sessionRuntime) runToolMember(
 	delegation *Delegation,
 	attempt int,
 ) (string, error) {
-	capabilities := r.providers.Capabilities(r.profile.Models[member.Model])
+	capabilities := r.providers.Capabilities(r.profile.Gateway, r.profile.Models[member.Model])
 	if len(delegation.Spec.RequiredTools) > 0 &&
 		capabilities.ToolCalling == provider.CapabilityUnsupported {
 		return "", fmt.Errorf(

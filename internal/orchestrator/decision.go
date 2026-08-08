@@ -9,10 +9,20 @@ type RouterDecision struct {
 type LeadDecision struct {
 	Assessment   string               `json:"assessment"`
 	Delegations  []ProposedDelegation `json:"delegations"`
+	PeerTurns    []ProposedPeerTurn   `json:"peer_turns"`
 	Cancel       []string             `json:"cancel"`
 	Finalize     bool                 `json:"finalize"`
 	FinalBrief   string               `json:"final_brief"`
 	observedWork int
+}
+
+type ProposedPeerTurn struct {
+	Key             string   `json:"key"`
+	PeerID          string   `json:"peer_id"`
+	CollaborationID string   `json:"collaboration_id"`
+	Objective       string   `json:"objective"`
+	Context         string   `json:"context"`
+	RequiredTools   []string `json:"required_tools"`
 }
 
 type ProposedDelegation struct {

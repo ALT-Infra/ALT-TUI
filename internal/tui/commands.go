@@ -16,9 +16,7 @@ type commandDefinition struct {
 var commandDefinitions = []commandDefinition{
 	{command: "/new", description: "start a fresh transcript"},
 	{command: "/profile", description: "choose a Team Profile"},
-	{command: "/team", description: "inspect pinned models, definitions, Lead eligibility, and call edges"},
-	{command: "/team new", description: "build a Team in the native graph editor"},
-	{command: "/team edit", description: "edit the selected Team or id[@revision]"},
+	{command: "/team", description: "create, edit, or inspect a Team in one graph window"},
 	{command: "/auth", description: "configure a gateway credential securely"},
 	{command: "/resume", description: "resume a saved conversation"},
 	{command: "/rename", description: "rename the active session", needsInput: true},

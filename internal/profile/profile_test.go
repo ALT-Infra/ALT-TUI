@@ -17,12 +17,15 @@ func TestBuiltInProfileUsesExactCatalogIdentitiesAndExplicitCallEdges(t *testing
 	if p.Router.Definition == "" {
 		t.Fatal("Router definition is empty")
 	}
+	if p.Gateway == "" {
+		t.Fatal("Team gateway is empty")
+	}
 
 	owners := map[string]string{}
 	register := func(memberID, alias string) {
 		t.Helper()
 		selected := p.Models[alias]
-		if selected.Gateway == "" || selected.Route == "" || selected.Name == "" {
+		if selected.Route == "" || selected.Name == "" {
 			t.Fatalf("%s has incomplete catalog identity: %#v", alias, selected)
 		}
 		identity := profile.ModelIdentity(selected)
@@ -47,9 +50,11 @@ func TestBuiltInProfileUsesExactCatalogIdentitiesAndExplicitCallEdges(t *testing
 
 	engineering, _ := p.Lead("engineering-lead")
 	research, _ := p.Lead("research-lead")
-	if !contains(engineering.Calls, "research-lead") ||
-		!contains(research.Calls, "engineering-lead") {
-		t.Fatal("cross-Lead call edges are missing")
+	if !contains(engineering.Calls, "research-specialist") ||
+		!contains(engineering.Peers, "research-specialist") ||
+		!contains(research.Calls, "technical-specialist") ||
+		!contains(research.Peers, "technical-specialist") {
+		t.Fatal("specialist call and peer edges are missing")
 	}
 }
 
@@ -71,6 +76,16 @@ func TestLeadCannotCallItself(t *testing.T) {
 	diagnostics := profile.Validate(document.Profile)
 	if !hasDiagnostic(diagnostics, profile.Error, "cannot call itself") {
 		t.Fatalf("self-call was not rejected: %#v", diagnostics)
+	}
+}
+
+func TestLeadCannotBeUsedAsContributorOrPeer(t *testing.T) {
+	document := builtIn(t)
+	document.Profile.Leads[0].Calls = []string{"research-lead"}
+	document.Profile.Leads[0].Peers = []string{"research-lead"}
+	diagnostics := profile.Validate(document.Profile)
+	if !hasDiagnostic(diagnostics, profile.Error, "exclusive roles") {
+		t.Fatalf("Lead/contributor dual role was not rejected: %#v", diagnostics)
 	}
 }
 
@@ -97,6 +112,32 @@ func TestOldSchemaAndOldFieldsAreRejected(t *testing.T) {
 	source = string(builtinprofiles.Engineering) + "\nlegacy_limits: true\n"
 	if _, err := profile.Parse([]byte(source)); err == nil {
 		t.Fatal("unknown legacy field was accepted")
+	}
+}
+
+func TestLegacyPerModelGatewayIsLiftedToTeam(t *testing.T) {
+	source := strings.Replace(string(builtinprofiles.Engineering), "gateway: opencode\n", "", 1)
+	source = strings.ReplaceAll(source, "    route:", "    gateway: OpenCode\n    route:")
+	document, err := profile.Parse([]byte(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if document.Profile.Gateway != "opencode" {
+		t.Fatalf("migrated gateway = %q", document.Profile.Gateway)
+	}
+	for alias, model := range document.Profile.Models {
+		if model.LegacyGateway != "" {
+			t.Fatalf("legacy gateway survived normalization for %s", alias)
+		}
+	}
+}
+
+func TestLegacyMixedGatewaysCannotBecomeATeam(t *testing.T) {
+	source := strings.Replace(string(builtinprofiles.Engineering), "gateway: opencode\n", "", 1)
+	source = strings.ReplaceAll(source, "    route:", "    gateway: opencode\n    route:")
+	source = strings.Replace(source, "    gateway: opencode\n", "    gateway: cline\n", 1)
+	if _, err := profile.Parse([]byte(source)); err == nil || !strings.Contains(err.Error(), "multiple") && !strings.Contains(err.Error(), "not Team gateway") {
+		t.Fatalf("legacy mixed-gateway profile was accepted: %v", err)
 	}
 }
 

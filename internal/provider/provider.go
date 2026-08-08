@@ -37,15 +37,40 @@ type GatewayRoute struct {
 	Label string `json:"label"`
 }
 
+type AuthenticationKind string
+
+const (
+	AuthenticationAPIKey      AuthenticationKind = "api_key"
+	AuthenticationDeviceOAuth AuthenticationKind = "device_oauth"
+)
+
 // GatewayDescriptor contains the integration facts owned by an adapter. ALT's
 // CLI, GUI, and profile layer consume this descriptor instead of embedding
 // gateway-specific names, credential variables, routes, or endpoint rules.
 type GatewayDescriptor struct {
-	ID                    string         `json:"id"`
-	Name                  string         `json:"name"`
-	CredentialEnvironment string         `json:"credential_environment"`
-	Routes                []GatewayRoute `json:"routes"`
-	MultiModelCatalog     bool           `json:"multi_model_catalog"`
+	ID                    string             `json:"id"`
+	Name                  string             `json:"name"`
+	CredentialEnvironment string             `json:"credential_environment"`
+	Authentication        AuthenticationKind `json:"authentication"`
+	Routes                []GatewayRoute     `json:"routes"`
+	MultiModelCatalog     bool               `json:"multi_model_catalog"`
+}
+
+// DeviceAuthorization is deliberately provider-neutral. A gateway owns the
+// protocol, tokens, refresh rotation, and persistence; clients only present
+// the verification link and code and report progress.
+type DeviceAuthorization struct {
+	VerificationURI         string
+	VerificationURIComplete string
+	UserCode                string
+	DeviceCode              string
+	ExpiresInSeconds        int
+	PollIntervalSeconds     int
+}
+
+type DeviceAuthenticator interface {
+	BeginDeviceAuthorization(context.Context) (DeviceAuthorization, error)
+	CompleteDeviceAuthorization(context.Context, DeviceAuthorization, func(string)) error
 }
 
 // CatalogModel is the exact gateway-issued choice ALT persists and executes.
@@ -89,7 +114,7 @@ func (r *Registry) Register(gateway Gateway) error {
 	if gateway == nil {
 		return fmt.Errorf("gateway adapter is required")
 	}
-	descriptor := gateway.Descriptor()
+	descriptor := normalizeDescriptor(gateway.Descriptor())
 	descriptor.ID = strings.ToLower(strings.TrimSpace(descriptor.ID))
 	if descriptor.ID == "" || strings.TrimSpace(descriptor.Name) == "" {
 		return fmt.Errorf("gateway ID and name are required")
@@ -99,6 +124,15 @@ func (r *Registry) Register(gateway Gateway) error {
 	}
 	if strings.TrimSpace(descriptor.CredentialEnvironment) == "" {
 		return fmt.Errorf("%s credential environment is required", descriptor.ID)
+	}
+	if descriptor.Authentication != AuthenticationAPIKey &&
+		descriptor.Authentication != AuthenticationDeviceOAuth {
+		return fmt.Errorf("%s declares unknown authentication kind %q", descriptor.ID, descriptor.Authentication)
+	}
+	if descriptor.Authentication == AuthenticationDeviceOAuth {
+		if _, ok := gateway.(DeviceAuthenticator); !ok {
+			return fmt.Errorf("%s declares device OAuth without implementing it", descriptor.ID)
+		}
 	}
 	seenRoutes := map[string]bool{}
 	for _, route := range descriptor.Routes {
@@ -121,6 +155,20 @@ func (r *Registry) Register(gateway Gateway) error {
 	return nil
 }
 
+func (r *Registry) DeviceAuthenticator(name string) (DeviceAuthenticator, error) {
+	r.mu.RLock()
+	gateway := r.gateways[strings.ToLower(strings.TrimSpace(name))]
+	r.mu.RUnlock()
+	if gateway == nil {
+		return nil, fmt.Errorf("gateway %s is not registered", name)
+	}
+	authenticator, ok := gateway.(DeviceAuthenticator)
+	if !ok {
+		return nil, fmt.Errorf("gateway %s does not use device authentication", name)
+	}
+	return authenticator, nil
+}
+
 func (r *Registry) Descriptor(name string) (GatewayDescriptor, error) {
 	r.mu.RLock()
 	gateway := r.gateways[strings.ToLower(strings.TrimSpace(name))]
@@ -128,18 +176,25 @@ func (r *Registry) Descriptor(name string) (GatewayDescriptor, error) {
 	if gateway == nil {
 		return GatewayDescriptor{}, fmt.Errorf("gateway %s is not registered", name)
 	}
-	return gateway.Descriptor(), nil
+	return normalizeDescriptor(gateway.Descriptor()), nil
 }
 
 func (r *Registry) Descriptors() []GatewayDescriptor {
 	r.mu.RLock()
 	result := make([]GatewayDescriptor, 0, len(r.gateways))
 	for _, gateway := range r.gateways {
-		result = append(result, gateway.Descriptor())
+		result = append(result, normalizeDescriptor(gateway.Descriptor()))
 	}
 	r.mu.RUnlock()
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result
+}
+
+func normalizeDescriptor(descriptor GatewayDescriptor) GatewayDescriptor {
+	if descriptor.Authentication == "" {
+		descriptor.Authentication = AuthenticationAPIKey
+	}
+	return descriptor
 }
 
 func (r *Registry) Model(ctx context.Context, p profile.Profile, reference string, mode Mode) (model.BaseChatModel, profile.Model, error) {
@@ -148,14 +203,14 @@ func (r *Registry) Model(ctx context.Context, p profile.Profile, reference strin
 		return nil, profile.Model{}, fmt.Errorf("model reference %s is not defined", reference)
 	}
 	r.mu.RLock()
-	gateway := r.gateways[strings.ToLower(strings.TrimSpace(spec.Gateway))]
+	gateway := r.gateways[strings.ToLower(strings.TrimSpace(p.Gateway))]
 	r.mu.RUnlock()
 	if gateway == nil {
-		return nil, profile.Model{}, fmt.Errorf("gateway %s is not registered", spec.Gateway)
+		return nil, profile.Model{}, fmt.Errorf("gateway %s is not registered", p.Gateway)
 	}
 	instance, err := gateway.NewChatModel(ctx, spec, mode)
 	if err != nil {
-		return nil, profile.Model{}, fmt.Errorf("create %s model %s: %w", spec.Gateway, spec.Name, err)
+		return nil, profile.Model{}, fmt.Errorf("create %s model %s: %w", p.Gateway, spec.Name, err)
 	}
 	return instance, spec, nil
 }
@@ -179,14 +234,15 @@ func (r *Registry) Catalog(ctx context.Context, name string) ([]CatalogModel, er
 	return models, nil
 }
 
-func (r *Registry) Capabilities(spec profile.Model) Capabilities {
+func (r *Registry) Capabilities(gatewayID string, spec profile.Model) Capabilities {
 	unknown := Capabilities{
 		StructuredOutput: CapabilityUnknown,
 		ToolCalling:      CapabilityUnknown,
 	}
 	r.mu.RLock()
-	gateway := r.gateways[strings.ToLower(strings.TrimSpace(spec.Gateway))]
-	catalogValue, catalogKnown := r.capabilities[profile.ModelIdentity(spec)]
+	gatewayID = strings.ToLower(strings.TrimSpace(gatewayID))
+	gateway := r.gateways[gatewayID]
+	catalogValue, catalogKnown := r.capabilities[selectionIdentity(gatewayID, spec)]
 	r.mu.RUnlock()
 	if catalogKnown {
 		if catalogValue.StructuredOutput == "" {
@@ -219,29 +275,32 @@ func CatalogIdentity(item CatalogModel) string {
 	}, "\x00")
 }
 
+func selectionIdentity(gateway string, selected profile.Model) string {
+	return strings.Join([]string{
+		strings.ToLower(strings.TrimSpace(gateway)),
+		strings.ToLower(strings.TrimSpace(selected.Route)),
+		strings.TrimSpace(selected.Name),
+	}, "\x00")
+}
+
 // ValidateProfile resolves every persisted selection against fresh,
 // authenticated catalogs. Missing models are reported; no adapter is allowed
 // to substitute or rewrite a selection.
 func (r *Registry) ValidateProfile(ctx context.Context, value profile.Profile) error {
-	catalogs := make(map[string]map[string]bool)
+	gatewayID := strings.ToLower(strings.TrimSpace(value.Gateway))
+	catalog, err := r.Catalog(ctx, gatewayID)
+	if err != nil {
+		return fmt.Errorf("validate Team gateway %s: %w", value.Gateway, err)
+	}
+	available := make(map[string]bool, len(catalog))
+	for _, item := range catalog {
+		available[CatalogIdentity(item)] = true
+	}
 	for alias, selected := range value.Models {
-		gatewayID := strings.ToLower(strings.TrimSpace(selected.Gateway))
-		available := catalogs[gatewayID]
-		if available == nil {
-			catalog, err := r.Catalog(ctx, gatewayID)
-			if err != nil {
-				return fmt.Errorf("validate model %s: %w", alias, err)
-			}
-			available = make(map[string]bool, len(catalog))
-			for _, item := range catalog {
-				available[CatalogIdentity(item)] = true
-			}
-			catalogs[gatewayID] = available
-		}
-		if !available[profile.ModelIdentity(selected)] {
+		if !available[selectionIdentity(gatewayID, selected)] {
 			return fmt.Errorf(
 				"model %s selects %s/%s/%s, which is absent from the current authenticated catalog; ALT will not substitute it",
-				alias, selected.Gateway, selected.Route, selected.Name,
+				alias, value.Gateway, selected.Route, selected.Name,
 			)
 		}
 	}

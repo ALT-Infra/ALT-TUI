@@ -28,7 +28,7 @@ func TestGatewayRegistryContainsEverySupportedMultiModelGateway(t *testing.T) {
 		}
 		credentialVariables[descriptor.CredentialEnvironment] = descriptor.ID
 	}
-	want := []string{"fireworks", "opencode", "together", "zenmux"}
+	want := []string{"cline", "fireworks", "opencode", "together", "zenmux"}
 	if !reflect.DeepEqual(ids, want) {
 		t.Fatalf("registered gateways = %#v, want %#v", ids, want)
 	}

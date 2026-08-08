@@ -48,7 +48,7 @@ type nativeFinishedMsg struct {
 
 func selectedTeamInspectorLaunch(document *profile.Document) nativegui.Launch {
 	return nativegui.Launch{
-		Mode:      nativegui.ModeTeamInspect,
+		Mode:      nativegui.ModeTeam,
 		ProfileID: document.Profile.ID,
 		Revision:  document.Profile.Revision,
 	}

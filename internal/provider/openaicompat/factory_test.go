@@ -62,9 +62,8 @@ func TestExecutionPreservesCatalogIdentityAndEndpointLimits(t *testing.T) {
 	})
 	factory.HTTPClient = &http.Client{Transport: transport}
 	chat, err := factory.NewChatModel(context.Background(), profile.Model{
-		Gateway: "test-gateway",
-		Route:   "serverless",
-		Name:    "provider/model",
+		Route: "serverless",
+		Name:  "provider/model",
 	}, provider.Text)
 	if err != nil {
 		t.Fatal(err)

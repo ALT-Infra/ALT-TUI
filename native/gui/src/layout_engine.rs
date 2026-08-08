@@ -35,6 +35,13 @@ pub(crate) struct Member {
 pub(crate) struct CallEdge {
     pub(crate) from: u64,
     pub(crate) to: u64,
+    pub(crate) relation: EdgeRelation,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum EdgeRelation {
+    Call,
+    Peer,
 }
 
 #[derive(Clone, Debug)]
@@ -88,11 +95,13 @@ pub(crate) fn layout_team(team: &Team) -> Layout {
             .map(|member| colors[&member.key])
             .all_equal();
 
-    let mut positions = if homogeneous_orbit {
-        layout_router_orbit(&canonical, &sccs[0])
-    } else {
-        layout_layered_modules(&canonical, &sccs, &colors)
-    };
+    let mut positions = physics_positions(team).unwrap_or_else(|| {
+        if homogeneous_orbit {
+            layout_router_orbit(&canonical, &sccs[0])
+        } else {
+            layout_layered_modules(&canonical, &sccs, &colors)
+        }
+    });
     center_positions(&canonical, &mut positions);
 
     let components = sccs
@@ -117,6 +126,173 @@ pub(crate) fn layout_team(team: &Team) -> Layout {
         components,
         colors,
     }
+}
+
+fn physics_positions(team: &Team) -> Option<BTreeMap<u64, Point>> {
+    use alt_graph_physics as physics;
+
+    let mut nodes = Vec::with_capacity(team.members.len() + 1);
+    nodes.push(physics::Node {
+        id: team.router_key,
+        size: physics::Size::new(
+            team.router_size.width as f64,
+            team.router_size.height as f64,
+        ),
+        pin: physics::Pin::Free,
+    });
+    nodes.extend(team.members.iter().map(|member| physics::Node {
+        id: member.key,
+        size: physics::Size::new(member.size.width as f64, member.size.height as f64),
+        pin: physics::Pin::Free,
+    }));
+
+    let mut next_edge = 0u64;
+    let mut edges = Vec::new();
+    let mut constraints = vec![physics::AxisConstraint::Position {
+        node: team.router_key,
+        axis: physics::Axis::Vertical,
+        coordinate: 0.0,
+        weight: 30.0,
+    }];
+    let mut push_edge = |source, target, kind, ideal_length, weight| {
+        next_edge += 1;
+        edges.push(physics::Edge {
+            id: next_edge,
+            source,
+            target,
+            kind,
+            ideal_length,
+            weight,
+            source_port: physics::Port::Free,
+            target_port: physics::Port::Free,
+        });
+    };
+    let mut lead_keys: Vec<_> = team
+        .members
+        .iter()
+        .filter(|member| member.roles.lead)
+        .map(|member| member.key)
+        .collect();
+    lead_keys.sort_unstable();
+    let lead_set: BTreeSet<_> = lead_keys.iter().copied().collect();
+    for &member_key in &lead_keys {
+        push_edge(
+            team.router_key,
+            member_key,
+            physics::EdgeKind::Directed {
+                target_delta: 190.0,
+            },
+            230.0,
+            1.4,
+        );
+        constraints.push(physics::AxisConstraint::Offset {
+            source: team.router_key,
+            target: member_key,
+            axis: physics::Axis::Vertical,
+            delta: 190.0,
+            weight: 16.0,
+        });
+        if member_key != lead_keys[0] {
+            constraints.push(physics::AxisConstraint::Alignment {
+                first: lead_keys[0],
+                second: member_key,
+                axis: physics::Axis::Vertical,
+                weight: 20.0,
+            });
+        }
+        constraints.push(physics::AxisConstraint::Separation {
+            before: team.router_key,
+            after: member_key,
+            axis: physics::Axis::Vertical,
+            minimum: 150.0,
+            weight: 24.0,
+        });
+    }
+    for member in team.members.iter().filter(|member| !member.roles.lead) {
+        constraints.push(physics::AxisConstraint::Separation {
+            before: team.router_key,
+            after: member.key,
+            axis: physics::Axis::Vertical,
+            minimum: 145.0,
+            weight: 24.0,
+        });
+    }
+    let mut semantic_edges = team.call_edges.clone();
+    semantic_edges.sort_unstable();
+    for edge in &semantic_edges {
+        let (kind, target_delta, weight) = match edge.relation {
+            EdgeRelation::Call => (
+                physics::EdgeKind::Directed {
+                    target_delta: 190.0,
+                },
+                190.0,
+                1.0,
+            ),
+            // Peer work is bidirectional in conversation, not in authority.
+            // The accountable Lead remains above its stateful contributor;
+            // only the rendered edge and runtime protocol differ from a call.
+            EdgeRelation::Peer => (
+                physics::EdgeKind::Directed {
+                    target_delta: 190.0,
+                },
+                190.0,
+                0.9,
+            ),
+        };
+        let ideal = if target_delta > 0.0 { 230.0 } else { 250.0 };
+        push_edge(edge.from, edge.to, kind, ideal, weight);
+        match edge.relation {
+            EdgeRelation::Call if !lead_set.contains(&edge.to) => {
+                constraints.push(physics::AxisConstraint::Separation {
+                    before: edge.from,
+                    after: edge.to,
+                    axis: physics::Axis::Vertical,
+                    minimum: 150.0,
+                    weight: 18.0,
+                });
+            }
+            EdgeRelation::Call => {}
+            EdgeRelation::Peer => constraints.push(physics::AxisConstraint::Separation {
+                before: edge.from,
+                after: edge.to,
+                axis: physics::Axis::Vertical,
+                minimum: 150.0,
+                weight: 18.0,
+            }),
+        }
+    }
+    let config = physics::LayoutConfig {
+        max_iterations: 360,
+        // Keep one physical pixel beyond the visual clearance so f64 -> f32
+        // conversion cannot turn an exact tangency into an overlap.
+        clearance: NODE_GAP as f64 + 1.0,
+        route_clearance: 14.0,
+        hierarchy_weight: 2.8,
+        crossing_weight: 0.3,
+        ..physics::LayoutConfig::default()
+    };
+    let output = physics::layout(&physics::LayoutInput {
+        nodes,
+        edges,
+        constraints,
+        config,
+    })
+    .ok()?;
+    Some(
+        output
+            .placements
+            .into_iter()
+            .map(|(key, placement)| {
+                (
+                    key,
+                    Point {
+                        x: (placement.center.x - placement.size.width * 0.5) as f32,
+                        y: (placement.center.y - placement.size.height * 0.5) as f32,
+                    },
+                )
+            })
+            .collect(),
+    )
 }
 
 /// Place an external terminal without moving the stable Team core.
@@ -1033,14 +1209,18 @@ mod tests {
                 .flat_map(|&from| {
                     keys.iter()
                         .filter(move |&&to| to != from)
-                        .map(move |&to| CallEdge { from, to })
+                        .map(move |&to| CallEdge {
+                            from,
+                            to,
+                            relation: EdgeRelation::Call,
+                        })
                 })
                 .collect(),
         }
     }
 
     #[test]
-    fn free_like_team_is_a_regular_nonoverlapping_router_orbit() {
+    fn physics_layout_preserves_router_flow_and_clearance_for_a_dense_cycle() {
         let team = complete_team(&[100, 101, 102, 103, 104, 105]);
         let layout = layout_team(&team);
         assert_eq!(layout.kind, LayoutKind::RouterOrbit);
@@ -1061,29 +1241,7 @@ mod tests {
                 },
             ));
         }
-        let radii: Vec<_> = centers
-            .iter()
-            .map(|(_, center)| (center.x - router_center.x).hypot(center.y - router_center.y))
-            .collect();
-        for radius in &radii[1..] {
-            assert!((radius - radii[0]).abs() < 0.001);
-        }
-
-        let mut angles: Vec<_> = centers
-            .iter()
-            .map(|(_, center)| {
-                (center.y - router_center.y)
-                    .atan2(center.x - router_center.x)
-                    .rem_euclid(std::f32::consts::TAU)
-            })
-            .collect();
-        angles.sort_by(f32::total_cmp);
-        let expected_gap = std::f32::consts::TAU / centers.len() as f32;
-        for slot in 0..angles.len() {
-            let gap = (angles[(slot + 1) % angles.len()] - angles[slot])
-                .rem_euclid(std::f32::consts::TAU);
-            assert!((gap - expected_gap).abs() < 0.001);
-        }
+        assert!(centers.iter().all(|(_, center)| center.y > router_center.y));
 
         let rect = |key: u64, size: Size| {
             let point = layout.positions[&key];
@@ -1262,7 +1420,7 @@ mod tests {
     }
 
     #[test]
-    fn free_like_six_member_orbit_keeps_user_in_the_left_gap() {
+    fn boundary_terminal_keeps_request_path_clear_for_a_dense_cycle() {
         let team = complete_team(&[100, 101, 102, 103, 104, 105]);
         let layout = layout_team(&team);
         let terminal_size = Size {
@@ -1272,8 +1430,6 @@ mod tests {
         let terminal = place_boundary_terminal(&team, &layout, terminal_size);
         let router = center(layout.positions[&team.router_key], team.router_size);
         let terminal = center(terminal, terminal_size);
-        assert!(terminal.x < router.x);
-        assert!((terminal.y - router.y).abs() < 0.001);
         for member in &team.members {
             let obstacle = CoreNode {
                 key: member.key,

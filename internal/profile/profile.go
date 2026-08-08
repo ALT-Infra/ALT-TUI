@@ -12,6 +12,7 @@ type Profile struct {
 	ID       string             `yaml:"id" json:"id"`
 	Revision int                `yaml:"revision" json:"revision"`
 	Name     string             `yaml:"name" json:"name"`
+	Gateway  string             `yaml:"gateway" json:"gateway"`
 	Models   map[string]Model   `yaml:"models" json:"models"`
 	Router   RouterAssignment   `yaml:"router" json:"router"`
 	Leads    []LeadAssignment   `yaml:"leads" json:"leads"`
@@ -20,11 +21,14 @@ type Profile struct {
 	Metadata map[string]string  `yaml:"metadata,omitempty" json:"metadata,omitempty"`
 }
 
-// Model is an exact catalog-issued selection. Gateway, Route, and Name form
-// the opaque executable identity. Credentials, endpoints, pricing, context
-// windows, and output ceilings remain owned by the gateway adapter.
+// Model is an exact selection from the Team gateway's catalog. Route and Name
+// form its opaque identity inside that one authenticated account. Credentials,
+// endpoints, pricing, context windows, and output ceilings remain gateway-owned.
 type Model struct {
-	Gateway         string            `yaml:"gateway" json:"gateway"`
+	// LegacyGateway is accepted only so pre-release Team revisions can be
+	// normalized while loading. New profiles never emit it: gateway ownership
+	// belongs to Profile.
+	LegacyGateway   string            `yaml:"gateway,omitempty" json:"gateway,omitempty"`
 	Route           string            `yaml:"route" json:"route"`
 	Name            string            `yaml:"name" json:"name"`
 	ReasoningEffort string            `yaml:"reasoning_effort,omitempty" json:"reasoning_effort,omitempty"`
@@ -41,6 +45,7 @@ type LeadAssignment struct {
 	Model      string   `yaml:"model" json:"model"`
 	Definition string   `yaml:"definition" json:"definition"`
 	Calls      []string `yaml:"calls,omitempty" json:"calls,omitempty"`
+	Peers      []string `yaml:"peers,omitempty" json:"peers,omitempty"`
 }
 
 type MemberAssignment struct {
@@ -68,11 +73,6 @@ func (p Profile) Member(id string) (MemberAssignment, bool) {
 			return member, true
 		}
 	}
-	if lead, ok := p.Lead(id); ok {
-		return MemberAssignment{
-			ID: lead.ID, Model: lead.Model, Definition: lead.Definition,
-		}, true
-	}
 	return MemberAssignment{}, false
 }
 
@@ -95,6 +95,25 @@ func (p Profile) CallableMemberFor(lead LeadAssignment, id string) (MemberAssign
 	return MemberAssignment{}, false
 }
 
+func (p Profile) PeerMembersFor(lead LeadAssignment) []MemberAssignment {
+	result := make([]MemberAssignment, 0, len(lead.Peers))
+	for _, id := range lead.Peers {
+		if member, ok := p.Member(id); ok {
+			result = append(result, member)
+		}
+	}
+	return result
+}
+
+func (p Profile) PeerMemberFor(lead LeadAssignment, id string) (MemberAssignment, bool) {
+	for _, memberID := range lead.Peers {
+		if memberID == id {
+			return p.Member(id)
+		}
+	}
+	return MemberAssignment{}, false
+}
+
 func (p Profile) RouterDefinition() string {
 	return p.Router.Definition
 }
@@ -109,7 +128,6 @@ func (p Profile) MemberDefinition(member MemberAssignment) string {
 
 func ModelIdentity(model Model) string {
 	return strings.Join([]string{
-		strings.ToLower(strings.TrimSpace(model.Gateway)),
 		strings.ToLower(strings.TrimSpace(model.Route)),
 		strings.TrimSpace(model.Name),
 	}, "\x00")

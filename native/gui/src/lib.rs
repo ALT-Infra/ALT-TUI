@@ -150,6 +150,14 @@ struct HostRequest<'a> {
     operation: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     draft: Option<&'a TeamDraft>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    view: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revision: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gateway: Option<&'a str>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -168,13 +176,29 @@ struct HostResponse {
 struct InitialState {
     mode: String,
     #[serde(default)]
+    view: String,
+    #[serde(default)]
     runtime: RuntimeCapabilities,
     #[serde(default)]
     catalog: Vec<CatalogModel>,
+    #[serde(default)]
+    gateways: Vec<GatewayDescriptor>,
+    #[serde(default)]
+    profiles: Vec<ProfileSummary>,
     draft: Option<TeamDraft>,
     thinking: Option<ThinkingProjection>,
     #[serde(default)]
     diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ProfileSummary {
+    #[serde(rename = "ID")]
+    id: String,
+    #[serde(rename = "Revision")]
+    revision: i32,
+    #[serde(rename = "Name")]
+    name: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -183,15 +207,18 @@ struct RuntimeCapabilities {
     filesystem_confinement: bool,
     direct_terminal_network: bool,
     exa_configured: bool,
-    #[serde(default)]
-    tools: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 struct CatalogModel {
-    gateway: String,
     route: String,
     id: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct GatewayDescriptor {
+    id: String,
+    name: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -199,11 +226,16 @@ struct TeamDraft {
     id: String,
     name: String,
     base_revision: i32,
+    gateway: String,
     router: DraftAssignment,
     #[serde(default)]
     members: Vec<DraftMember>,
     #[serde(default)]
+    router_edges: Vec<String>,
+    #[serde(default)]
     call_edges: Vec<CallEdge>,
+    #[serde(default)]
+    peer_edges: Vec<PeerEdge>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -217,7 +249,6 @@ struct DraftMember {
     id: String,
     model: ModelChoice,
     definition: String,
-    lead: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -227,8 +258,13 @@ struct CallEdge {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct PeerEdge {
+    lead_id: String,
+    member_id: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct ModelChoice {
-    gateway: String,
     route: String,
     id: String,
 }
@@ -317,8 +353,15 @@ fn host_exchange(
     operation: &str,
     draft: Option<&TeamDraft>,
 ) -> Result<HostResponse, String> {
-    let request = serde_json::to_vec(&HostRequest { operation, draft })
-        .map_err(|error| format!("encode host request: {error}"))?;
+    let request = serde_json::to_vec(&HostRequest {
+        operation,
+        draft,
+        view: None,
+        profile_id: None,
+        revision: None,
+        gateway: None,
+    })
+    .map_err(|error| format!("encode host request: {error}"))?;
     let required = unsafe {
         alt_gui_host_exchange(
             handle,
@@ -359,6 +402,76 @@ fn host_exchange(
     serde_json::from_slice(&response).map_err(|error| format!("decode host response: {error}"))
 }
 
+fn host_open_team(
+    handle: u64,
+    view: &str,
+    profile_id: Option<&str>,
+    revision: Option<i32>,
+) -> Result<HostResponse, String> {
+    let request = serde_json::to_vec(&HostRequest {
+        operation: "team.open",
+        draft: None,
+        view: Some(view),
+        profile_id,
+        revision,
+        gateway: None,
+    })
+    .map_err(|error| format!("encode host request: {error}"))?;
+    host_exchange_bytes(handle, request)
+}
+
+fn host_select_gateway(
+    handle: u64,
+    gateway: &str,
+    draft: &TeamDraft,
+) -> Result<HostResponse, String> {
+    let request = serde_json::to_vec(&HostRequest {
+        operation: "team.gateway",
+        draft: Some(draft),
+        view: None,
+        profile_id: None,
+        revision: None,
+        gateway: Some(gateway),
+    })
+    .map_err(|error| format!("encode host request: {error}"))?;
+    host_exchange_bytes(handle, request)
+}
+
+fn host_exchange_bytes(handle: u64, request: Vec<u8>) -> Result<HostResponse, String> {
+    let required = unsafe {
+        alt_gui_host_exchange(
+            handle,
+            request.as_ptr(),
+            request.len(),
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if required >= 0 {
+        return Err(format!(
+            "host sizing probe returned {required}; expected the exact required byte count"
+        ));
+    }
+    let mut response = vec![0_u8; (-required) as usize];
+    let written = unsafe {
+        alt_gui_host_exchange(
+            handle,
+            request.as_ptr(),
+            request.len(),
+            response.as_mut_ptr(),
+            response.len(),
+        )
+    };
+    if written < 0 {
+        return Err(format!(
+            "host response size changed after preparation ({} bytes now required)",
+            -written
+        ));
+    }
+    response.truncate(written as usize);
+    serde_json::from_slice(&response).map_err(|error| format!("decode host response: {error}"))
+}
+
 #[no_mangle]
 pub extern "C" fn alt_native_gui_run(handle: u64) -> i32 {
     let initial = match host_exchange(handle, "init", None) {
@@ -374,9 +487,8 @@ pub extern "C" fn alt_native_gui_run(handle: u64) -> i32 {
     };
     let title = match state.mode.as_str() {
         "thinking" => "ALT — Thinking",
-        "team-inspect" => "ALT — Team",
-        "team-edit" => "ALT — Edit Team",
-        _ => "ALT — New Team",
+        "team" => "ALT — Team",
+        _ => "ALT",
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -398,13 +510,15 @@ pub extern "C" fn alt_native_gui_run(handle: u64) -> i32 {
                     initial.error,
                     &cc.egui_ctx,
                 )),
-                "team-inspect" | "team-edit" | "team-new" => AltApp::Team(TeamApp::new(
+                "team" => AltApp::Team(TeamApp::new(
                     handle,
                     state.draft.unwrap_or_default(),
                     state.catalog,
+                    state.gateways,
+                    state.profiles,
                     state.diagnostics,
                     initial.error,
-                    state.mode == "team-inspect",
+                    TeamView::from_wire(&state.view),
                     state.runtime,
                 )),
                 _ => return Err(format!("unsupported native GUI mode {}", state.mode).into()),
@@ -491,11 +605,52 @@ enum Selection {
     Member(u64),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TeamView {
+    New,
+    Edit,
+    Inspect,
+}
+
+impl TeamView {
+    fn from_wire(value: &str) -> Self {
+        match value {
+            "edit" => Self::Edit,
+            "inspect" => Self::Inspect,
+            _ => Self::New,
+        }
+    }
+
+    fn wire(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Edit => "edit",
+            Self::Inspect => "inspect",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::New => "New Team",
+            Self::Edit => "Edit Team",
+            Self::Inspect => "Inspect Team",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConnectionKind {
+    Call,
+    Peer,
+}
+
 struct TeamApp {
     handle: u64,
-    read_only: bool,
+    team_view: TeamView,
     draft: TeamDraft,
     catalog: Vec<CatalogModel>,
+    gateways: Vec<GatewayDescriptor>,
+    profiles: Vec<ProfileSummary>,
     member_uids: Vec<u64>,
     next_uid: u64,
     selection: Selection,
@@ -503,22 +658,29 @@ struct TeamApp {
     selected_edges: HashSet<String>,
     show_all_edges: bool,
     view: egui_graph::View,
+    graph_screen_rect: egui::Rect,
     routes: EdgeRoutes,
     layout_frames: u8,
     model_filter: String,
     diagnostics: Vec<Diagnostic>,
     status: String,
     runtime: RuntimeCapabilities,
+    connection_kind: ConnectionKind,
+    choose_target_for: Option<TeamView>,
+    inspector_open: bool,
 }
 
 impl TeamApp {
+    #[allow(clippy::too_many_arguments)] // Mirrors the typed native init payload.
     fn new(
         handle: u64,
         draft: TeamDraft,
         catalog: Vec<CatalogModel>,
+        gateways: Vec<GatewayDescriptor>,
+        profiles: Vec<ProfileSummary>,
         diagnostics: Vec<Diagnostic>,
         init_error: String,
-        read_only: bool,
+        team_view: TeamView,
         runtime: RuntimeCapabilities,
     ) -> Self {
         let member_uids: Vec<u64> = (0..draft.members.len())
@@ -527,45 +689,111 @@ impl TeamApp {
         let next_uid = 100 + member_uids.len() as u64;
         Self {
             handle,
-            read_only,
+            team_view,
             draft,
             catalog,
+            gateways,
+            profiles,
             member_uids,
             next_uid,
             selection: Selection::Router,
             edge_in_progress: None,
             selected_edges: HashSet::new(),
-            show_all_edges: false,
+            show_all_edges: team_view == TeamView::Inspect,
             view: Default::default(),
+            graph_screen_rect: egui::Rect::NOTHING,
             routes: Default::default(),
             layout_frames: 3,
             model_filter: String::new(),
             diagnostics,
             status: init_error,
             runtime,
+            connection_kind: ConnectionKind::Call,
+            choose_target_for: None,
+            inspector_open: false,
         }
+    }
+
+    fn read_only(&self) -> bool {
+        self.team_view == TeamView::Inspect
+    }
+
+    fn is_lead(&self, id: &str) -> bool {
+        self.draft
+            .router_edges
+            .iter()
+            .any(|candidate| candidate == id)
+    }
+
+    #[cfg(test)]
+    fn graph_to_screen(&self, point: egui::Pos2) -> egui::Pos2 {
+        let scene = self.view.scene_rect;
+        let scale = pixel_perfect_scene_zoom_range()
+            .clamp((self.graph_screen_rect.size() / scene.size()).min_elem());
+        let translation =
+            self.graph_screen_rect.center().to_vec2() - scale * scene.center().to_vec2();
+        egui::Pos2::new(
+            translation.x + scale * point.x,
+            translation.y + scale * point.y,
+        )
     }
 
     fn update(&mut self, root: &mut egui::Ui) {
         let ctx = root.ctx().clone();
+        let mut requested_gateway = None;
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.inspector_open = false;
+        }
         egui::Panel::top("team-toolbar").show_inside(root, |ui| {
             ui.horizontal(|ui| {
-                ui.heading(if self.read_only {
-                    if self.draft.name.is_empty() {
-                        "Team".to_owned()
-                    } else {
-                        self.draft.name.clone()
-                    }
-                } else if self.draft.base_revision > 0 {
-                    format!("Edit Team · revision {}", self.draft.base_revision)
+                ui.heading(if self.draft.name.is_empty() {
+                    "Team"
                 } else {
-                    "New Team".to_owned()
+                    &self.draft.name
                 });
                 ui.separator();
-                if self.read_only {
+                let previous = self.team_view;
+                egui::ComboBox::from_id_salt("team-view-switcher")
+                    .selected_text(self.team_view.label())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.team_view, TeamView::New, "New Team");
+                        ui.selectable_value(&mut self.team_view, TeamView::Edit, "Edit Team");
+                        ui.selectable_value(&mut self.team_view, TeamView::Inspect, "Inspect Team");
+                    });
+                if self.team_view != previous {
+                    let requested = self.team_view;
+                    self.team_view = previous;
+                    self.request_view(requested);
+                }
+                ui.separator();
+                if self.read_only() {
+                    ui.weak("Gateway");
+                    ui.monospace(gateway_label(&self.gateways, &self.draft.gateway));
+                } else {
+                    let current = self.draft.gateway.clone();
+                    let mut selected = current.clone();
+                    egui::ComboBox::from_id_salt("team-gateway-switcher")
+                        .selected_text(if current.is_empty() {
+                            "Choose gateway account".to_owned()
+                        } else {
+                            gateway_label(&self.gateways, &current)
+                        })
+                        .show_ui(ui, |ui| {
+                            for gateway in &self.gateways {
+                                ui.selectable_value(
+                                    &mut selected,
+                                    gateway.id.clone(),
+                                    format!("{} · {}", gateway.name, gateway.id),
+                                );
+                            }
+                        });
+                    if selected != current {
+                        requested_gateway = Some(selected);
+                    }
+                }
+                ui.separator();
+                if self.read_only() {
                     ui.monospace(format!("{}@{}", self.draft.id, self.draft.base_revision));
-                    ui.separator();
-                    ui.weak("READ ONLY");
                     ui.separator();
                     let edge_label = if self.show_all_edges {
                         "Focus selection"
@@ -576,18 +804,22 @@ impl TeamApp {
                         self.show_all_edges = !self.show_all_edges;
                     }
                 } else {
-                    if ui.button("+ Lead").clicked() {
-                        self.add_member(true);
-                    }
                     if ui.button("+ Member").clicked() {
-                        self.add_member(false);
+                        self.add_member();
                     }
+                    ui.separator();
+                    ui.weak("Draw");
+                    ui.selectable_value(&mut self.connection_kind, ConnectionKind::Call, "Call");
+                    ui.selectable_value(&mut self.connection_kind, ConnectionKind::Peer, "Peer");
                 }
                 runtime_policy_badge(ui, &self.runtime);
                 if ui.button("Auto layout").clicked() {
                     self.layout_frames = 3;
                 }
-                if !self.read_only {
+                if !self.inspector_open && ui.button("Details").clicked() {
+                    self.inspector_open = true;
+                }
+                if !self.read_only() {
                     ui.separator();
                     if ui.button("Validate").clicked() {
                         self.validate();
@@ -595,11 +827,11 @@ impl TeamApp {
                     let publish = egui::Button::new("Publish revision")
                         .fill(egui::Color32::from_rgb(25, 110, 137));
                     if ui.add(publish).clicked() {
-                        self.publish(&ctx);
+                        self.publish();
                     }
                 }
             });
-            if !self.read_only {
+            if !self.read_only() {
                 ui.horizontal(|ui| {
                     ui.label("Name");
                     ui.add(egui::TextEdit::singleline(&mut self.draft.name).desired_width(360.0));
@@ -611,7 +843,11 @@ impl TeamApp {
             }
         });
 
-        if !self.read_only {
+        if let Some(gateway) = requested_gateway {
+            self.select_gateway(&gateway);
+        }
+
+        if !self.read_only() {
             egui::Panel::bottom("team-diagnostics")
                 .resizable(true)
                 .default_size(128.0)
@@ -646,25 +882,46 @@ impl TeamApp {
                 });
         }
 
-        egui::Panel::right("team-inspector")
-            .resizable(true)
-            .default_size(420.0)
-            .min_size(320.0)
-            .show_inside(root, |ui| {
-                if self.read_only {
-                    self.read_only_inspector(ui);
-                } else {
-                    self.scrollable_editor_inspector(ui);
-                }
-            });
-
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(egui::Color32::from_rgb(13, 15, 18)))
             .show_inside(root, |ui| self.graph(ui));
+
+        if self.inspector_open {
+            let screen = ctx.content_rect();
+            let width = (screen.width() * 0.32).clamp(360.0, 520.0);
+            let height = (screen.height() * 0.72).clamp(360.0, 760.0);
+            let mut open = true;
+            egui::Window::new("Details")
+                .id(egui::Id::new("team-inspector"))
+                .open(&mut open)
+                .default_pos(egui::pos2(
+                    (screen.right() - width - 18.0).max(screen.left() + 18.0),
+                    screen.top() + 58.0,
+                ))
+                .default_size(egui::vec2(width, height))
+                .min_width(320.0)
+                .max_width(560.0)
+                .max_height(screen.height() - 88.0)
+                .resizable(true)
+                .collapsible(false)
+                .show(&ctx, |ui| {
+                    if self.read_only() {
+                        egui::ScrollArea::vertical()
+                            .id_salt("team-read-only-inspector-scroll")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| self.read_only_inspector(ui));
+                    } else {
+                        self.scrollable_editor_inspector(ui);
+                    }
+                });
+            self.inspector_open = open;
+        }
+
+        self.target_picker(&ctx);
     }
 
-    fn add_member(&mut self, lead: bool) {
-        let prefix = if lead { "lead" } else { "member" };
+    fn add_member(&mut self) {
+        let prefix = "member";
         let mut ordinal = self.draft.members.len() + 1;
         let id = loop {
             let candidate = format!("{prefix}-{ordinal}");
@@ -683,12 +940,104 @@ impl TeamApp {
         self.member_uids.push(uid);
         self.draft.members.push(DraftMember {
             id,
-            lead,
             ..Default::default()
         });
         self.selection = Selection::Member(uid);
         self.layout_frames = 3;
         self.status.clear();
+    }
+
+    fn request_view(&mut self, requested: TeamView) {
+        if requested == TeamView::New {
+            self.open_team_view(requested, None, None);
+        } else if self.draft.base_revision > 0 {
+            let id = self.draft.id.clone();
+            self.open_team_view(requested, Some(&id), Some(self.draft.base_revision));
+        } else {
+            self.choose_target_for = Some(requested);
+        }
+    }
+
+    fn select_gateway(&mut self, gateway: &str) {
+        match host_select_gateway(self.handle, gateway, &self.draft) {
+            Ok(response) => {
+                if let Some(initial) = response.initial {
+                    self.catalog = initial.catalog;
+                    self.gateways = initial.gateways;
+                    self.diagnostics = initial.diagnostics;
+                    self.status = response.error;
+                    if let Some(draft) = initial.draft {
+                        self.draft = draft;
+                    }
+                    self.selection = Selection::Router;
+                    self.model_filter.clear();
+                } else {
+                    self.status = response.error;
+                }
+            }
+            Err(error) => self.status = error,
+        }
+    }
+
+    fn open_team_view(&mut self, view: TeamView, id: Option<&str>, revision: Option<i32>) {
+        match host_open_team(self.handle, view.wire(), id, revision) {
+            Ok(response) => {
+                if let Some(initial) = response.initial {
+                    self.team_view = TeamView::from_wire(&initial.view);
+                    self.catalog = initial.catalog;
+                    self.gateways = initial.gateways;
+                    self.profiles = initial.profiles;
+                    self.diagnostics = initial.diagnostics;
+                    self.status = response.error;
+                    if let Some(draft) = initial.draft {
+                        self.draft = draft;
+                        self.member_uids = (0..self.draft.members.len())
+                            .map(|index| 100 + index as u64)
+                            .collect();
+                        self.next_uid = 100 + self.member_uids.len() as u64;
+                        self.selection = Selection::Router;
+                        self.selected_edges.clear();
+                        self.layout_frames = 3;
+                    }
+                    self.choose_target_for = None;
+                } else {
+                    self.status = response.error;
+                }
+            }
+            Err(error) => self.status = error,
+        }
+    }
+
+    fn target_picker(&mut self, ctx: &egui::Context) {
+        let Some(view) = self.choose_target_for else {
+            return;
+        };
+        let mut open = true;
+        egui::Window::new(format!("{} — choose a revision", view.label()))
+            .collapsible(false)
+            .resizable(true)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("Choose the immutable Team revision to open.");
+                ui.add_space(6.0);
+                let profiles = self.profiles.clone();
+                egui::ScrollArea::vertical()
+                    .max_height(360.0)
+                    .show(ui, |ui| {
+                        for item in profiles {
+                            let label = format!("{}@{} · {}", item.id, item.revision, item.name);
+                            if ui.button(label).clicked() {
+                                self.open_team_view(view, Some(&item.id), Some(item.revision));
+                            }
+                        }
+                    });
+                if self.profiles.is_empty() {
+                    ui.weak("No published Teams exist yet. Switch to New Team first.");
+                }
+            });
+        if !open {
+            self.choose_target_for = None;
+        }
     }
 
     fn read_only_inspector(&self, ui: &mut egui::Ui) {
@@ -702,7 +1051,12 @@ impl TeamApp {
                     read_only_definition(ui, &self.draft.router.definition);
                     ui.add_space(12.0);
                     ui.strong("Routes to");
-                    for member in self.draft.members.iter().filter(|member| member.lead) {
+                    for member in self
+                        .draft
+                        .members
+                        .iter()
+                        .filter(|member| self.is_lead(&member.id))
+                    {
                         ui.monospace(&member.id);
                     }
                 }
@@ -716,12 +1070,17 @@ impl TeamApp {
                     };
                     let member = &self.draft.members[index];
                     ui.heading(&member.id);
-                    ui.label(if member.lead { "Lead" } else { "Member" });
+                    let is_lead = self.is_lead(&member.id);
+                    ui.label(if is_lead {
+                        "Lead"
+                    } else {
+                        "Specialist contributor"
+                    });
                     ui.add_space(10.0);
                     read_only_model(ui, &member.model);
                     read_only_definition(ui, &member.definition);
 
-                    if member.lead {
+                    if is_lead {
                         ui.add_space(12.0);
                         ui.strong("Can call");
                         let mut any = false;
@@ -736,6 +1095,21 @@ impl TeamApp {
                         }
                         if !any {
                             ui.weak("No callable members assigned.");
+                        }
+                        ui.add_space(8.0);
+                        ui.strong("Can collaborate with peers");
+                        let mut any_peer = false;
+                        for edge in self
+                            .draft
+                            .peer_edges
+                            .iter()
+                            .filter(|edge| edge.lead_id == member.id)
+                        {
+                            any_peer = true;
+                            ui.monospace(&edge.member_id);
+                        }
+                        if !any_peer {
+                            ui.weak("No peer relationships assigned.");
                         }
                     }
                     ui.add_space(12.0);
@@ -752,6 +1126,21 @@ impl TeamApp {
                     }
                     if !any {
                         ui.weak("Not callable by a Lead.");
+                    }
+                    ui.add_space(8.0);
+                    ui.strong("Peer to");
+                    let mut any_peer = false;
+                    for edge in self
+                        .draft
+                        .peer_edges
+                        .iter()
+                        .filter(|edge| edge.member_id == member.id)
+                    {
+                        any_peer = true;
+                        ui.monospace(&edge.lead_id);
+                    }
+                    if !any_peer {
+                        ui.weak("Not available for stateful peer work.");
                     }
                 }
             }
@@ -786,7 +1175,6 @@ impl TeamApp {
                 };
                 let old_id = self.draft.members[index].id.clone();
                 let identity_changed;
-                let mut roles_changed = false;
                 let delete;
                 {
                     let member = &mut self.draft.members[index];
@@ -801,11 +1189,12 @@ impl TeamApp {
                             egui::TextEdit::singleline(&mut member.id).desired_width(f32::INFINITY),
                         )
                         .changed();
-                    ui.horizontal(|ui| {
-                        ui.label("Authority");
-                        roles_changed |= ui.checkbox(&mut member.lead, "Eligible Lead").changed();
-                    });
-                    ui.weak("Every node is a Team member. Lead eligibility permits Router selection and outgoing calls.");
+                    let role = if self.draft.router_edges.iter().any(|id| id == &member.id) {
+                        "Lead — authority comes from the Router edge"
+                    } else {
+                        "Specialist contributor"
+                    };
+                    ui.weak(role);
                     ui.add_space(8.0);
                     model_editor(ui, &self.catalog, &mut self.model_filter, &mut member.model);
                     definition_editor(ui, &mut member.definition);
@@ -827,11 +1216,20 @@ impl TeamApp {
                             edge.member_id.clone_from(&new_id);
                         }
                     }
+                    for edge in &mut self.draft.peer_edges {
+                        if edge.lead_id == old_id {
+                            edge.lead_id.clone_from(&new_id);
+                        }
+                        if edge.member_id == old_id {
+                            edge.member_id.clone_from(&new_id);
+                        }
+                    }
+                    for id in &mut self.draft.router_edges {
+                        if *id == old_id {
+                            id.clone_from(&new_id);
+                        }
+                    }
                     self.layout_frames = 2;
-                }
-                if roles_changed {
-                    self.prune_invalid_role_edges();
-                    self.layout_frames = 3;
                 }
                 if delete {
                     self.delete_member(uid);
@@ -851,6 +1249,7 @@ impl TeamApp {
     }
 
     fn graph(&mut self, ui: &mut egui::Ui) {
+        self.graph_screen_rect = ui.available_rect_before_wrap();
         let center_view = self.layout_frames == 1;
         if self.layout_frames > 0 {
             self.relayout(ui.ctx());
@@ -868,11 +1267,16 @@ impl TeamApp {
         let edge_layout = view.layout.clone();
         let mut graph = egui_graph::Graph::from_id(team_graph_id())
             .center_view(center_view)
-            .dot_grid(true)
+            // The grid is a direct-manipulation affordance: it makes camera
+            // movement and alignment legible while authoring. In Inspect it
+            // competes with the stored topology without adding information.
+            .dot_grid(!self.read_only())
             .wheel_zoom(true)
             .zoom_range(pixel_perfect_scene_zoom_range())
+            .prevent_node_overlap(!self.read_only())
+            .node_clearance(12.0)
             .selected_nodes(selected_nodes);
-        if self.read_only {
+        if self.read_only() {
             graph = graph
                 .drag_pan_buttons(
                     egui::containers::DragPanButtons::PRIMARY
@@ -885,32 +1289,39 @@ impl TeamApp {
             graph = graph.align(true);
         }
         let response = graph.show(&mut view, ui, |ui, show| {
+            if self.read_only() {
+                self.render_read_only_scaffold(ui, &edge_layout);
+            }
             show.nodes(ui, |nctx, ui| self.render_nodes(nctx, ui, &ports))
                 .edges(ui, |ectx, ui| {
                     self.render_edges(ectx, ui, &edge_layout, &ports)
                 });
         });
         self.view = view;
-        if !self.read_only && self.view.layout != edge_layout {
+        if !self.read_only() && self.view.layout != edge_layout {
             self.reroute(ui.ctx());
             ui.ctx().request_repaint();
         }
         if let Some(selected) = response.selection_changed {
             if selected.contains(&router_node_id()) {
                 self.selection = Selection::Router;
+                self.inspector_open = true;
+                if self.read_only() {
+                    self.show_all_edges = false;
+                }
             } else if let Some(id) = selected.iter().next() {
                 self.selection = Selection::Member(id.0);
+                self.inspector_open = true;
+                if self.read_only() {
+                    self.show_all_edges = false;
+                }
             }
         }
-        if !self.read_only {
+        if !self.read_only() {
             response.response.context_menu(|ui| {
                 ui.strong("Create Team member");
-                if ui.button("Lead").clicked() {
-                    self.add_member(true);
-                    ui.close();
-                }
                 if ui.button("Member").clicked() {
-                    self.add_member(false);
+                    self.add_member();
                     ui.close();
                 }
             });
@@ -930,19 +1341,46 @@ impl TeamApp {
             .copied()
             .unwrap_or_default();
         let router_response = egui_graph::node::Node::from_id(router_node_id())
-            .outputs(if self.read_only {
+            .outputs(if self.read_only() {
                 0
             } else {
                 router_outputs.max(1)
             })
+            .socket_radius(6.0)
+            .socket_color(egui::Color32::from_rgb(112, 180, 206))
             .flow(egui::Direction::TopDown)
-            .animation_time(if self.read_only { 0.0 } else { 0.1 })
+            .animation_time(if self.read_only() { 0.0 } else { 0.1 })
             .show(nctx, ui, |node_ctx| {
-                node_ctx.framed(|ui, _| {
-                    if self.read_only {
+                let focused = self.node_in_focus(router_node_id());
+                let selected = node_ctx.interaction().selected;
+                let mut frame =
+                    egui_graph::node::default_frame(node_ctx.style(), node_ctx.interaction());
+                frame.fill = if focused {
+                    egui::Color32::from_rgb(25, 22, 37)
+                } else {
+                    egui::Color32::from_rgb(17, 17, 22)
+                };
+                if !selected {
+                    frame.stroke = egui::Stroke::new(
+                        1.6,
+                        egui::Color32::from_rgb(178, 132, 255).gamma_multiply(if focused {
+                            1.0
+                        } else {
+                            0.22
+                        }),
+                    );
+                }
+                node_ctx.framed_with(frame, |ui, _| {
+                    if self.read_only() {
                         ui.visuals_mut().disabled_alpha = 1.0;
                     }
-                    ui.strong("ROUTER");
+                    ui.label(egui::RichText::new("ROUTER").strong().color(
+                        egui::Color32::from_rgb(211, 184, 255).gamma_multiply(if focused {
+                            1.0
+                        } else {
+                            0.3
+                        }),
+                    ));
                     model_badge(ui, &self.draft.router.model);
                 })
             });
@@ -954,29 +1392,74 @@ impl TeamApp {
         for (index, member) in self.draft.members.iter().enumerate() {
             let uid = self.member_uids[index];
             let node_id = NodeId::from_u64(uid);
-            let roles = if member.lead { "LEAD" } else { "MEMBER" };
+            let lead = self.is_lead(&member.id);
+            let peer = self
+                .draft
+                .peer_edges
+                .iter()
+                .any(|edge| edge.member_id == member.id);
+            let roles = if lead {
+                "LEAD"
+            } else if peer {
+                "PEER CONTRIBUTOR"
+            } else {
+                "SPECIALIST"
+            };
             let inputs = ports.inputs.get(&node_id).copied().unwrap_or_default();
             let outputs = ports.outputs.get(&node_id).copied().unwrap_or_default();
             let response = egui_graph::node::Node::from_id(node_id)
-                .inputs(if self.read_only { 0 } else { inputs.max(1) })
-                .outputs(if self.read_only || !member.lead {
-                    0
-                } else {
-                    outputs.max(1)
-                })
+                .inputs(if self.read_only() { 0 } else { inputs.max(1) })
+                .outputs(if self.read_only() { 0 } else { outputs.max(1) })
                 .flow(egui::Direction::TopDown)
-                .animation_time(if self.read_only { 0.0 } else { 0.1 })
+                .animation_time(if self.read_only() { 0.0 } else { 0.1 })
+                .socket_radius(6.0)
+                .socket_color(match self.connection_kind {
+                    ConnectionKind::Call => egui::Color32::from_rgb(69, 184, 218),
+                    ConnectionKind::Peer => egui::Color32::from_rgb(236, 190, 74),
+                })
                 .show(nctx, ui, |node_ctx| {
-                    node_ctx.framed(|ui, _| {
-                        if self.read_only {
+                    let focused = self.node_in_focus(node_id);
+                    let selected = node_ctx.interaction().selected;
+                    let accent = (if lead {
+                        egui::Color32::from_rgb(99, 164, 255)
+                    } else {
+                        egui::Color32::from_rgb(82, 211, 158)
+                    })
+                    .gamma_multiply(if focused { 1.0 } else { 0.22 });
+                    let mut frame =
+                        egui_graph::node::default_frame(node_ctx.style(), node_ctx.interaction());
+                    frame.fill = if !focused {
+                        egui::Color32::from_rgb(16, 18, 20)
+                    } else if lead {
+                        egui::Color32::from_rgb(18, 28, 43)
+                    } else {
+                        egui::Color32::from_rgb(17, 31, 28)
+                    };
+                    if !selected {
+                        frame.stroke = egui::Stroke::new(if lead { 1.5 } else { 1.15 }, accent);
+                    }
+                    node_ctx.framed_with(frame, |ui, _| {
+                        if self.read_only() {
                             ui.visuals_mut().disabled_alpha = 1.0;
                         }
-                        ui.strong(if member.id.is_empty() {
-                            "unnamed"
-                        } else {
-                            &member.id
-                        });
-                        ui.small(roles);
+                        if !focused {
+                            ui.visuals_mut().override_text_color =
+                                Some(egui::Color32::from_rgb(73, 79, 84));
+                        }
+                        ui.label(
+                            egui::RichText::new(if member.id.is_empty() {
+                                "unnamed"
+                            } else {
+                                &member.id
+                            })
+                            .strong()
+                            .color(accent),
+                        );
+                        ui.label(
+                            egui::RichText::new(roles)
+                                .small()
+                                .color(accent.gamma_multiply(0.76)),
+                        );
                         model_badge(ui, &member.model);
                     })
                 });
@@ -1002,7 +1485,7 @@ impl TeamApp {
         layout: &egui_graph::Layout,
         ports: &PortLayout,
     ) {
-        if self.read_only {
+        if self.read_only() {
             self.render_read_only_edges(ui, layout);
             return;
         }
@@ -1015,21 +1498,50 @@ impl TeamApp {
                 .copied()
                 .unwrap_or(((edge.from, 0), (edge.to, 0)));
             let waypoints = self.routes.route(pair.0, pair.1, 0).unwrap_or(&[]);
-            let mut selected = !self.read_only && self.selected_edges.contains(&edge.key);
-            let mut widget =
+            let mut selected = !self.read_only() && self.selected_edges.contains(&edge.key);
+            let widget =
                 egui_graph::edge::Edge::new(pair.0, pair.1, &mut selected).waypoints(waypoints);
-            if self.read_only {
-                let color = match edge.kind {
-                    GraphEdgeKind::Router => egui::Color32::from_rgb(112, 130, 148),
-                    GraphEdgeKind::Call if self.show_all_edges => {
-                        egui::Color32::from_rgba_unmultiplied(69, 184, 218, 88)
+            let color = match edge.kind {
+                GraphEdgeKind::Router => egui::Color32::from_rgb(112, 130, 148),
+                GraphEdgeKind::Call => egui::Color32::from_rgb(69, 184, 218),
+                GraphEdgeKind::Peer => egui::Color32::from_rgb(236, 190, 74),
+            };
+            let widget = widget
+                .stroke(egui::Stroke::new(1.8, color))
+                .hovered_stroke(egui::Stroke::new(2.6, color))
+                .selected_stroke(egui::Stroke::new(3.0, color));
+            let kind = edge.kind;
+            let response = widget.show_with(ectx, ui, |ui, paint| {
+                if matches!(kind, GraphEdgeKind::Peer) {
+                    ui.painter().extend(egui::Shape::dashed_line(
+                        paint.points,
+                        paint.stroke,
+                        8.0,
+                        5.0,
+                    ));
+                } else {
+                    ui.painter()
+                        .add(egui::Shape::line(paint.points.to_vec(), paint.stroke));
+                }
+                if let Some(head) = arrow_head(paint.points, 8.0) {
+                    ui.painter().add(egui::Shape::convex_polygon(
+                        head.to_vec(),
+                        paint.stroke.color,
+                        egui::Stroke::NONE,
+                    ));
+                }
+                if matches!(kind, GraphEdgeKind::Peer) {
+                    let reversed: Vec<_> = paint.points.iter().rev().copied().collect();
+                    if let Some(head) = arrow_head(&reversed, 8.0) {
+                        ui.painter().add(egui::Shape::convex_polygon(
+                            head.to_vec(),
+                            paint.stroke.color,
+                            egui::Stroke::NONE,
+                        ));
                     }
-                    GraphEdgeKind::Call => egui::Color32::from_rgb(69, 184, 218),
-                };
-                widget = widget.stroke(egui::Stroke::new(1.5, color));
-            }
-            let response = widget.show(ectx, ui);
-            if !self.read_only {
+                }
+            });
+            if !self.read_only() {
                 if response.deleted() {
                     deleted.push(edge);
                 } else if response.changed() {
@@ -1069,20 +1581,48 @@ impl TeamApp {
             .filter_map(|id| Some((id, rect_for(id)?)))
             .collect();
 
-        for edge in self.visible_graph_edges() {
-            let (Some(from_rect), Some(to_rect)) = (rect_for(edge.from), rect_for(edge.to)) else {
+        // Route the complete visible relation set together. Independent
+        // center-ray routing makes dense graphs look tangled even when every
+        // individual path avoids nodes: several relations leave a rectangle
+        // through the same visual point. The live router allocates distinct,
+        // monotonically ordered free-boundary ports before obstacle routing,
+        // which gives Inspect the same locally traceable connection grammar as
+        // live execution without changing the stable Team placement.
+        let edges = self.visible_graph_edges();
+        let flow_nodes: Vec<_> = node_rects
+            .iter()
+            .map(|(id, rect)| flow_router::FlowNode {
+                id: *id,
+                rect: *rect,
+            })
+            .collect();
+        let flow_edges: Vec<_> = edges
+            .iter()
+            .map(|edge| flow_router::FlowEdge {
+                key: edge.key.clone(),
+                from: edge.from,
+                to: edge.to,
+            })
+            .collect();
+        let routes = flow_router::route_flow_edges(&flow_nodes, &flow_edges, 14.0);
+
+        for edge in edges {
+            let Some(points) = routes.path(&edge.key).map(|path| path.to_vec()) else {
                 continue;
             };
-            let points = route_between_rects(edge.from, from_rect, edge.to, to_rect, &node_rects);
             if points.len() < 2 {
                 continue;
             }
             let color = match edge.kind {
                 GraphEdgeKind::Router => egui::Color32::from_rgb(112, 130, 148),
                 GraphEdgeKind::Call if self.show_all_edges => {
-                    egui::Color32::from_rgba_unmultiplied(69, 184, 218, 72)
+                    egui::Color32::from_rgba_unmultiplied(69, 184, 218, 122)
                 }
                 GraphEdgeKind::Call => egui::Color32::from_rgb(69, 184, 218),
+                GraphEdgeKind::Peer if self.show_all_edges => {
+                    egui::Color32::from_rgba_unmultiplied(236, 190, 74, 138)
+                }
+                GraphEdgeKind::Peer => egui::Color32::from_rgb(236, 190, 74),
             };
             let stroke = egui::Stroke::new(
                 if matches!(edge.kind, GraphEdgeKind::Router) {
@@ -1092,7 +1632,12 @@ impl TeamApp {
                 },
                 color,
             );
-            ui.painter().add(egui::Shape::line(points.clone(), stroke));
+            if matches!(edge.kind, GraphEdgeKind::Peer) {
+                ui.painter()
+                    .extend(egui::Shape::dashed_line(&points, stroke, 8.0, 5.0));
+            } else {
+                ui.painter().add(egui::Shape::line(points.clone(), stroke));
+            }
             if let Some(head) = arrow_head(&points, 8.0) {
                 ui.painter().add(egui::Shape::convex_polygon(
                     head.to_vec(),
@@ -1100,6 +1645,64 @@ impl TeamApp {
                     egui::Stroke::NONE,
                 ));
             }
+            if matches!(edge.kind, GraphEdgeKind::Peer) {
+                let reversed: Vec<_> = points.iter().rev().copied().collect();
+                if let Some(head) = arrow_head(&reversed, 8.0) {
+                    ui.painter().add(egui::Shape::convex_polygon(
+                        head.to_vec(),
+                        color,
+                        egui::Stroke::NONE,
+                    ));
+                }
+            }
+        }
+    }
+
+    fn render_read_only_scaffold(&self, ui: &mut egui::Ui, layout: &egui_graph::Layout) {
+        let mut all_x = Vec::new();
+        let mut lead_y = Vec::new();
+        let mut contributor_y = Vec::new();
+        if let Some(position) = layout.get(&router_node_id()) {
+            all_x.push(position.x);
+        }
+        for (index, member) in self.draft.members.iter().enumerate() {
+            let Some(position) = layout.get(&NodeId::from_u64(self.member_uids[index])) else {
+                continue;
+            };
+            all_x.push(position.x);
+            if self.is_lead(&member.id) {
+                lead_y.push(position.y);
+            } else {
+                contributor_y.push(position.y);
+            }
+        }
+        if all_x.is_empty() {
+            return;
+        }
+        let left = all_x.iter().copied().fold(f32::INFINITY, f32::min) - 54.0;
+        let right = all_x.iter().copied().fold(f32::NEG_INFINITY, f32::max) + 250.0;
+        let painter = ui.painter();
+        let color = egui::Color32::from_rgba_unmultiplied(126, 144, 164, 48);
+        let label_color = egui::Color32::from_rgba_unmultiplied(159, 174, 191, 105);
+        for (label, values) in [
+            ("ACCOUNTABLE LEADS", &lead_y),
+            ("CALLABLE CONTRIBUTORS", &contributor_y),
+        ] {
+            if values.is_empty() {
+                continue;
+            }
+            let y = values.iter().sum::<f32>() / values.len() as f32 - 34.0;
+            painter.line_segment(
+                [egui::pos2(left, y), egui::pos2(right, y)],
+                egui::Stroke::new(0.75, color),
+            );
+            painter.text(
+                egui::pos2(left, y - 7.0),
+                egui::Align2::LEFT_BOTTOM,
+                label,
+                egui::FontId::monospace(9.0),
+                label_color,
+            );
         }
     }
 
@@ -1128,7 +1731,24 @@ impl TeamApp {
             return;
         };
         if from == router_node_id() {
-            self.draft.members[target].lead = true;
+            let id = self.draft.members[target].id.clone();
+            let contributor = self
+                .draft
+                .call_edges
+                .iter()
+                .any(|edge| edge.member_id == id)
+                || self
+                    .draft
+                    .peer_edges
+                    .iter()
+                    .any(|edge| edge.member_id == id);
+            if contributor {
+                self.status = "Disconnect incoming call/peer edges first: a model cannot be both Lead and contributor.".to_owned();
+                return;
+            }
+            if !self.is_lead(&id) {
+                self.draft.router_edges.push(id);
+            }
             self.status = "Lead role added.".to_owned();
             self.layout_frames = 3;
             return;
@@ -1140,20 +1760,36 @@ impl TeamApp {
             self.status = "A Lead cannot call itself.".to_owned();
             return;
         }
-        if !self.draft.members[source].lead {
+        if !self.is_lead(&self.draft.members[source].id) {
             self.status = "Only the Router or a Lead can own an outgoing edge.".to_owned();
             return;
         }
-        let edge = CallEdge {
-            lead_id: self.draft.members[source].id.clone(),
-            member_id: self.draft.members[target].id.clone(),
-        };
-        if !self.draft.call_edges.iter().any(|candidate| {
-            candidate.lead_id == edge.lead_id && candidate.member_id == edge.member_id
-        }) {
-            self.draft.call_edges.push(edge);
+        if self.is_lead(&self.draft.members[target].id) {
+            self.status = "A Lead cannot also be a specialist or peer contributor.".to_owned();
+            return;
         }
-        self.status = "Call edge added.".to_owned();
+        let lead_id = self.draft.members[source].id.clone();
+        let member_id = self.draft.members[target].id.clone();
+        match self.connection_kind {
+            ConnectionKind::Call => {
+                let edge = CallEdge { lead_id, member_id };
+                if !self.draft.call_edges.iter().any(|candidate| {
+                    candidate.lead_id == edge.lead_id && candidate.member_id == edge.member_id
+                }) {
+                    self.draft.call_edges.push(edge);
+                }
+                self.status = "Stateless call edge added.".to_owned();
+            }
+            ConnectionKind::Peer => {
+                let edge = PeerEdge { lead_id, member_id };
+                if !self.draft.peer_edges.iter().any(|candidate| {
+                    candidate.lead_id == edge.lead_id && candidate.member_id == edge.member_id
+                }) {
+                    self.draft.peer_edges.push(edge);
+                }
+                self.status = "Stateful peer edge added.".to_owned();
+            }
+        }
         self.layout_frames = 3;
     }
 
@@ -1161,7 +1797,8 @@ impl TeamApp {
         match edge.kind {
             GraphEdgeKind::Router => {
                 if let Some(index) = self.member_index_for_node(edge.to) {
-                    self.draft.members[index].lead = false;
+                    let id = self.draft.members[index].id.clone();
+                    self.draft.router_edges.retain(|candidate| candidate != &id);
                     self.prune_invalid_role_edges();
                 }
             }
@@ -1170,22 +1807,35 @@ impl TeamApp {
                     .call_edges
                     .retain(|item| format!("call:{}:{}", item.lead_id, item.member_id) != edge.key);
             }
+            GraphEdgeKind::Peer => {
+                self.draft
+                    .peer_edges
+                    .retain(|item| format!("peer:{}:{}", item.lead_id, item.member_id) != edge.key);
+            }
         }
         self.selected_edges.remove(&edge.key);
         self.layout_frames = 3;
     }
 
     fn prune_invalid_role_edges(&mut self) {
-        let roles: HashMap<String, bool> = self
+        let members: HashSet<String> = self
             .draft
             .members
             .iter()
-            .map(|member| (member.id.clone(), member.lead))
+            .map(|member| member.id.clone())
             .collect();
+        let leads: HashSet<String> = self.draft.router_edges.iter().cloned().collect();
         self.draft.call_edges.retain(|edge| {
             edge.lead_id != edge.member_id
-                && roles.get(&edge.lead_id).is_some_and(|lead| *lead)
-                && roles.contains_key(&edge.member_id)
+                && leads.contains(&edge.lead_id)
+                && members.contains(&edge.member_id)
+                && !leads.contains(&edge.member_id)
+        });
+        self.draft.peer_edges.retain(|edge| {
+            edge.lead_id != edge.member_id
+                && leads.contains(&edge.lead_id)
+                && members.contains(&edge.member_id)
+                && !leads.contains(&edge.member_id)
         });
     }
 
@@ -1203,6 +1853,10 @@ impl TeamApp {
         self.draft
             .call_edges
             .retain(|edge| edge.lead_id != id && edge.member_id != id);
+        self.draft
+            .peer_edges
+            .retain(|edge| edge.lead_id != id && edge.member_id != id);
+        self.draft.router_edges.retain(|candidate| candidate != &id);
         self.selection = Selection::Router;
         self.layout_frames = 3;
     }
@@ -1214,7 +1868,7 @@ impl TeamApp {
     fn graph_edges(&self) -> Vec<GraphEdge> {
         let mut result = Vec::new();
         for (index, member) in self.draft.members.iter().enumerate() {
-            if member.lead {
+            if self.is_lead(&member.id) {
                 result.push(GraphEdge {
                     key: format!("router:{}", member.id),
                     from: router_node_id(),
@@ -1247,12 +1901,36 @@ impl TeamApp {
                 kind: GraphEdgeKind::Call,
             });
         }
+        for peer in &self.draft.peer_edges {
+            let Some(source) = self
+                .draft
+                .members
+                .iter()
+                .position(|member| member.id == peer.lead_id)
+            else {
+                continue;
+            };
+            let Some(target) = self
+                .draft
+                .members
+                .iter()
+                .position(|member| member.id == peer.member_id)
+            else {
+                continue;
+            };
+            result.push(GraphEdge {
+                key: format!("peer:{}:{}", peer.lead_id, peer.member_id),
+                from: NodeId::from_u64(self.member_uids[source]),
+                to: NodeId::from_u64(self.member_uids[target]),
+                kind: GraphEdgeKind::Peer,
+            });
+        }
         result
     }
 
     fn visible_graph_edges(&self) -> Vec<GraphEdge> {
         let edges = self.graph_edges();
-        if !self.read_only || self.show_all_edges {
+        if !self.read_only() || self.show_all_edges {
             return edges;
         }
         let Selection::Member(uid) = self.selection else {
@@ -1264,12 +1942,12 @@ impl TeamApp {
         let selected = NodeId::from_u64(uid);
         let selected_is_lead = self
             .member_index_for_node(selected)
-            .is_some_and(|index| self.draft.members[index].lead);
+            .is_some_and(|index| self.is_lead(&self.draft.members[index].id));
         edges
             .into_iter()
             .filter(|edge| {
                 matches!(edge.kind, GraphEdgeKind::Router) && edge.to == selected
-                    || matches!(edge.kind, GraphEdgeKind::Call)
+                    || matches!(edge.kind, GraphEdgeKind::Call | GraphEdgeKind::Peer)
                         && if selected_is_lead {
                             edge.from == selected
                         } else {
@@ -1277,6 +1955,15 @@ impl TeamApp {
                         }
             })
             .collect()
+    }
+
+    fn node_in_focus(&self, node: NodeId) -> bool {
+        if !self.read_only() || self.show_all_edges || node == router_node_id() {
+            return true;
+        }
+        self.visible_graph_edges()
+            .iter()
+            .any(|edge| edge.from == node || edge.to == node)
     }
 
     fn relayout(&mut self, ctx: &egui::Context) {
@@ -1309,6 +1996,12 @@ impl TeamApp {
             .call_edges
             .iter()
             .map(|edge| edge.member_id.as_str())
+            .chain(
+                self.draft
+                    .peer_edges
+                    .iter()
+                    .map(|edge| edge.member_id.as_str()),
+            )
             .collect();
         let team = layout_engine::Team {
             router_key: router_node_id().value(),
@@ -1328,7 +2021,7 @@ impl TeamApp {
                         height: member_sizes[index].y,
                     },
                     roles: layout_engine::Roles {
-                        lead: member.lead,
+                        lead: self.is_lead(&member.id),
                         callable: callable_members.contains(member.id.as_str()),
                     },
                 })
@@ -1341,8 +2034,19 @@ impl TeamApp {
                     Some(layout_engine::CallEdge {
                         from: self.member_uids[*member_index.get(edge.lead_id.as_str())?],
                         to: self.member_uids[*member_index.get(edge.member_id.as_str())?],
+                        relation: layout_engine::EdgeRelation::Call,
                     })
                 })
+                // A peer edge is semantically bidirectional, but its endpoints
+                // retain exclusive authority roles. Rank it Lead -> contributor
+                // so a shared peer cannot collapse the whole Team into one SCC.
+                .chain(self.draft.peer_edges.iter().filter_map(|edge| {
+                    Some(layout_engine::CallEdge {
+                        from: self.member_uids[*member_index.get(edge.lead_id.as_str())?],
+                        to: self.member_uids[*member_index.get(edge.member_id.as_str())?],
+                        relation: layout_engine::EdgeRelation::Peer,
+                    })
+                }))
                 .collect(),
         };
         let layout = layout_engine::layout_team(&team);
@@ -1351,7 +2055,7 @@ impl TeamApp {
             .into_iter()
             .map(|(key, point)| (NodeId::from_u64(key), egui::pos2(point.x, point.y)))
             .collect();
-        if self.read_only {
+        if self.read_only() {
             self.routes = EdgeRoutes::default();
         } else {
             self.reroute(ctx);
@@ -1394,7 +2098,7 @@ impl TeamApp {
             .members
             .iter()
             .enumerate()
-            .filter_map(|(index, member)| {
+            .filter_map(|(index, _member)| {
                 let id = NodeId::from_u64(self.member_uids[index]);
                 let position = self.view.layout.get(&id).copied()?;
                 let size = sizes
@@ -1407,11 +2111,7 @@ impl TeamApp {
                     LayoutNode::new(size)
                         .socket_padding(socket_padding)
                         .inputs(ports.inputs.get(&id).copied().unwrap_or_default().max(1))
-                        .outputs(if member.lead {
-                            ports.outputs.get(&id).copied().unwrap_or_default().max(1)
-                        } else {
-                            0
-                        }),
+                        .outputs(ports.outputs.get(&id).copied().unwrap_or_default().max(1)),
                 ))
             });
         let edges = self
@@ -1478,18 +2178,20 @@ impl TeamApp {
         }
     }
 
-    fn publish(&mut self, ctx: &egui::Context) {
+    fn publish(&mut self) {
         match host_exchange(self.handle, "team.publish", Some(&self.draft)) {
             Ok(response) => {
                 self.diagnostics = response.diagnostics;
                 if let Some(published) = response.published {
+                    let id = published.id.clone();
+                    let revision = published.revision;
                     self.status = format!(
                         "Published {}@{} ({})",
                         published.id,
                         published.revision,
                         &published.digest[..published.digest.len().min(8)]
                     );
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    self.open_team_view(TeamView::Inspect, Some(&id), Some(revision));
                 } else {
                     self.status = if response.error.is_empty() {
                         "Publish was rejected.".to_owned()
@@ -1515,6 +2217,7 @@ struct GraphEdge {
 enum GraphEdgeKind {
     Router,
     Call,
+    Peer,
 }
 
 fn router_node_id() -> NodeId {
@@ -1525,13 +2228,18 @@ fn team_graph_id() -> egui::Id {
     egui_graph::id("ALT Team Builder")
 }
 
+fn gateway_label(gateways: &[GatewayDescriptor], id: &str) -> String {
+    gateways
+        .iter()
+        .find(|gateway| gateway.id == id)
+        .map(|gateway| format!("{} · {}", gateway.name, gateway.id))
+        .unwrap_or_else(|| id.to_owned())
+}
+
 fn read_only_model(ui: &mut egui::Ui, model: &ModelChoice) {
     ui.strong("Exact model");
     model_badge(ui, model);
     ui.horizontal_wrapped(|ui| {
-        ui.weak("Gateway");
-        ui.monospace(&model.gateway);
-        ui.separator();
         ui.weak("Route");
         ui.monospace(&model.route);
     });
@@ -1604,7 +2312,7 @@ fn model_editor(
     ui.horizontal(|ui| {
         model_badge(ui, selected);
         if !selected.route.is_empty() {
-            ui.weak(format!("{} · {}", selected.gateway, selected.route));
+            ui.weak(&selected.route);
         }
     });
     ui.add(
@@ -1621,17 +2329,13 @@ fn model_editor(
                 if !needle.is_empty()
                     && !item.id.to_lowercase().contains(&needle)
                     && !item.route.to_lowercase().contains(&needle)
-                    && !item.gateway.to_lowercase().contains(&needle)
                 {
                     continue;
                 }
-                let active = selected.gateway == item.gateway
-                    && selected.id == item.id
-                    && selected.route == item.route;
-                let label = format!("{}  ·  {} / {}", item.id, item.gateway, item.route);
+                let active = selected.id == item.id && selected.route == item.route;
+                let label = format!("{}  ·  {}", item.id, item.route);
                 if ui.selectable_label(active, label).clicked() {
                     *selected = ModelChoice {
-                        gateway: item.gateway.clone(),
                         route: item.route.clone(),
                         id: item.id.clone(),
                     };
@@ -1697,6 +2401,7 @@ struct ThinkingApp {
     view: egui_graph::View,
     routes: flow_router::FlowRoutes,
     selected: Option<String>,
+    inspector_open: bool,
     live: LiveRegistration,
     observed_generation: u64,
     structure_fingerprint: u64,
@@ -1722,6 +2427,7 @@ impl ThinkingApp {
             view: Default::default(),
             routes: Default::default(),
             selected: None,
+            inspector_open: false,
             live: LiveRegistration::new(handle, context),
             observed_generation: u64::MAX,
             structure_fingerprint: 0,
@@ -1735,7 +2441,14 @@ impl ThinkingApp {
     }
 
     fn update(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.show(root);
+    }
+
+    fn show(&mut self, root: &mut egui::Ui) {
         let ctx = root.ctx().clone();
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.inspector_open = false;
+        }
         let generation = self.live.generation.load(Ordering::Acquire);
         if generation != self.observed_generation {
             self.refresh();
@@ -1768,6 +2481,9 @@ impl ThinkingApp {
                 if ui.button("Auto layout").clicked() {
                     self.layout_frames = 3;
                 }
+                if !self.inspector_open && ui.button("Details").clicked() {
+                    self.inspector_open = true;
+                }
                 runtime_policy_badge(ui, &self.runtime);
                 if !self.error.is_empty() {
                     ui.separator();
@@ -1789,18 +2505,35 @@ impl ThinkingApp {
                 });
             }
         });
-        egui::Panel::right("thinking-inspector")
-            .resizable(true)
-            .default_size(340.0)
-            .min_size(280.0)
-            .show_inside(root, |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("thinking-inspector-scroll")
-                    .show(ui, |ui| self.thinking_inspector(ui));
-            });
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(egui::Color32::from_rgb(13, 15, 18)))
             .show_inside(root, |ui| self.thinking_graph(ui));
+        if self.inspector_open {
+            let screen = ctx.content_rect();
+            let width = (screen.width() * 0.30).clamp(340.0, 500.0);
+            let height = (screen.height() * 0.68).clamp(340.0, 720.0);
+            let mut open = true;
+            egui::Window::new("Execution provenance")
+                .id(egui::Id::new("thinking-inspector"))
+                .open(&mut open)
+                .default_pos(egui::pos2(
+                    (screen.right() - width - 18.0).max(screen.left() + 18.0),
+                    screen.top() + 58.0,
+                ))
+                .default_size(egui::vec2(width, height))
+                .min_width(300.0)
+                .max_width(540.0)
+                .max_height(screen.height() - 88.0)
+                .resizable(true)
+                .collapsible(false)
+                .show(&ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("thinking-inspector-scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| self.thinking_inspector(ui));
+                });
+            self.inspector_open = open;
+        }
     }
 
     fn refresh(&mut self) {
@@ -1844,10 +2577,17 @@ impl ThinkingApp {
             .as_ref()
             .map(|id| HashSet::from([thinking_node_id(id)]))
             .unwrap_or_default();
+        let animated_edges = animated_thinking_edges(
+            &self.state.active,
+            self.selected.as_deref(),
+            MAX_ANIMATED_LIVE_EDGES,
+        );
         let mut view = std::mem::take(&mut self.view);
         let response = egui_graph::Graph::from_id(thinking_graph_id())
             .center_view(center_view)
-            .dot_grid(true)
+            // Live provenance is read, not spatially authored. A stationary
+            // dot field only adds non-semantic contrast behind active paths.
+            .dot_grid(false)
             .wheel_zoom(true)
             .drag_pan_buttons(
                 egui::containers::DragPanButtons::PRIMARY
@@ -1869,13 +2609,38 @@ impl ThinkingApp {
                             .outputs(0)
                             .flow(egui::Direction::TopDown)
                             .show(nctx, ui, |node_ctx| {
-                                node_ctx.framed(|ui, _| {
+                                let accent = thinking_node_accent(node);
+                                let selected = node_ctx.interaction().selected;
+                                let active = node.status == "running";
+                                let mut frame = egui_graph::node::default_frame(
+                                    node_ctx.style(),
+                                    node_ctx.interaction(),
+                                );
+                                frame.fill =
+                                    accent.gamma_multiply(if active { 0.20 } else { 0.11 });
+                                if !selected {
+                                    frame.stroke = egui::Stroke::new(
+                                        if active { 2.0 } else { 1.2 },
+                                        accent.gamma_multiply(if active { 1.0 } else { 0.72 }),
+                                    );
+                                }
+                                node_ctx.framed_with(frame, |ui, _| {
                                     ui.visuals_mut().disabled_alpha = 1.0;
                                     ui.horizontal(|ui| {
                                         ui.colored_label(status_color(&node.status), "●");
-                                        ui.strong(&node.label);
+                                        ui.label(
+                                            egui::RichText::new(&node.label).strong().color(accent),
+                                        );
                                     });
-                                    ui.small(format!("{} · {}", node.kind, node.status));
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "{} · {}",
+                                            thinking_node_role(node),
+                                            node.status
+                                        ))
+                                        .small()
+                                        .color(accent.gamma_multiply(0.72)),
+                                    );
                                 })
                             });
                     }
@@ -1886,7 +2651,7 @@ impl ThinkingApp {
                         .active
                         .edges
                         .values()
-                        .filter(|edge| edge.kind != "allowed")
+                        .filter(|edge| !is_allowed_edge(&edge.kind))
                     {
                         let Some(points) = self.routes.path(&edge.id) else {
                             continue;
@@ -1906,7 +2671,12 @@ impl ThinkingApp {
                             1.7
                         };
                         let stroke = egui::Stroke::new(width, color);
-                        ui.painter().add(egui::Shape::line(points.to_vec(), stroke));
+                        if matches!(edge.kind.as_str(), "peer" | "peer-result") {
+                            ui.painter()
+                                .extend(egui::Shape::dashed_line(points, stroke, 8.0, 5.0));
+                        } else {
+                            ui.painter().add(egui::Shape::line(points.to_vec(), stroke));
+                        }
                         if let Some(head) = arrow_head(points, 8.0) {
                             ui.painter().add(egui::Shape::convex_polygon(
                                 head.to_vec(),
@@ -1914,10 +2684,29 @@ impl ThinkingApp {
                                 egui::Stroke::NONE,
                             ));
                         }
-                        if edge.active > 0 {
+                        if edge.direction == "bidirectional" {
+                            let reversed: Vec<_> = points.iter().rev().copied().collect();
+                            if let Some(head) = arrow_head(&reversed, 8.0) {
+                                ui.painter().add(egui::Shape::convex_polygon(
+                                    head.to_vec(),
+                                    color,
+                                    egui::Stroke::NONE,
+                                ));
+                            }
+                        }
+                        if edge.active > 0 && animated_edges.contains(&edge.id) {
                             let offset = (thinking_node_id(&edge.id).value() % 997) as f64 / 997.0;
-                            let phase =
-                                (ui.input(|input| input.time) * 0.42 + offset).fract() as f32;
+                            let path_length = points
+                                .windows(2)
+                                .map(|segment| segment[0].distance(segment[1]))
+                                .sum::<f32>()
+                                .max(1.0);
+                            let viewport = ui.clip_rect().size().min_elem().max(1.0);
+                            let cycles_per_second =
+                                (viewport * LIVE_MARKER_VIEWPORTS_PER_SECOND) / path_length;
+                            let phase = (ui.input(|input| input.time) * cycles_per_second as f64
+                                + offset)
+                                .fract() as f32;
                             if let Some(point) = point_along_polyline(points, phase) {
                                 ui.painter().circle_filled(point, 4.2, color);
                             }
@@ -1968,6 +2757,7 @@ impl ThinkingApp {
                 .keys()
                 .find(|id| selected.contains(&thinking_node_id(id)))
                 .cloned();
+            self.inspector_open = self.selected.is_some();
         }
     }
 
@@ -2058,7 +2848,7 @@ impl ThinkingApp {
             .edges
             .values()
             .filter(|edge| {
-                edge.kind == "allowed"
+                is_allowed_edge(&edge.kind)
                     && edge.from.starts_with("member:")
                     && edge.to.starts_with("member:")
             })
@@ -2096,14 +2886,23 @@ impl ThinkingApp {
                 .edges
                 .values()
                 .filter(|edge| {
-                    edge.kind == "allowed"
+                    is_allowed_edge(&edge.kind)
                         && edge.from.starts_with("member:")
                         && edge.to.starts_with("member:")
                 })
                 .filter_map(|edge| {
+                    let &from = member_keys.get(edge.from.as_str())?;
+                    let &to = member_keys.get(edge.to.as_str())?;
+                    // Rendered peer arrows remain bidirectional; layout follows
+                    // the Lead -> contributor authority tier.
                     Some(layout_engine::CallEdge {
-                        from: *member_keys.get(edge.from.as_str())?,
-                        to: *member_keys.get(edge.to.as_str())?,
+                        from,
+                        to,
+                        relation: if edge.kind == "allowed-peer" {
+                            layout_engine::EdgeRelation::Peer
+                        } else {
+                            layout_engine::EdgeRelation::Call
+                        },
                     })
                 })
                 .collect(),
@@ -2224,13 +3023,6 @@ fn runtime_capabilities(ui: &mut egui::Ui, runtime: &RuntimeCapabilities) {
                 .on_hover_text("Run `alt auth set exa`.");
         }
     });
-    ui.add_space(8.0);
-    ui.strong("Model-callable tools");
-    ui.horizontal_wrapped(|ui| {
-        for tool in &runtime.tools {
-            ui.monospace(tool);
-        }
-    });
 }
 
 fn thinking_graph_id() -> egui::Id {
@@ -2347,7 +3139,7 @@ fn thinking_fingerprint(state: &ThinkingProjection) -> u64 {
         .active
         .edges
         .values()
-        .filter(|edge| edge.kind == "allowed" || edge.kind == "tool")
+        .filter(|edge| is_allowed_edge(&edge.kind) || edge.kind == "tool")
     {
         edge.id.hash(&mut hasher);
         edge.from.hash(&mut hasher);
@@ -2364,7 +3156,7 @@ fn thinking_routing_fingerprint(state: &ThinkingProjection) -> u64 {
         .active
         .edges
         .values()
-        .filter(|edge| edge.kind != "allowed")
+        .filter(|edge| !is_allowed_edge(&edge.kind))
     {
         edge.id.hash(&mut hasher);
         edge.from.hash(&mut hasher);
@@ -2408,7 +3200,7 @@ fn thinking_routes(
         .active
         .edges
         .values()
-        .filter(|edge| edge.kind != "allowed")
+        .filter(|edge| !is_allowed_edge(&edge.kind))
         .map(|edge| flow_router::FlowEdge {
             key: edge.id.clone(),
             from: thinking_node_id(&edge.from),
@@ -2428,15 +3220,83 @@ fn status_color(status: &str) -> egui::Color32 {
     }
 }
 
+fn thinking_node_role(node: &ThinkingNode) -> &'static str {
+    match node.kind.as_str() {
+        "router" => "ROUTER",
+        "user" => "USER",
+        "tool" => "TOOL",
+        "member"
+            if node
+                .metadata
+                .get("lead")
+                .is_some_and(|value| value == "true") =>
+        {
+            "LEAD"
+        }
+        "member" => "CONTRIBUTOR",
+        _ => "EVENT",
+    }
+}
+
+fn thinking_node_accent(node: &ThinkingNode) -> egui::Color32 {
+    match thinking_node_role(node) {
+        "ROUTER" => egui::Color32::from_rgb(178, 132, 255),
+        "LEAD" => egui::Color32::from_rgb(99, 164, 255),
+        "CONTRIBUTOR" => egui::Color32::from_rgb(82, 211, 158),
+        "USER" => egui::Color32::from_rgb(239, 143, 100),
+        "TOOL" => egui::Color32::from_rgb(158, 166, 178),
+        _ => egui::Color32::from_rgb(126, 144, 164),
+    }
+}
+
 fn thinking_edge_color(kind: &str) -> egui::Color32 {
     match kind {
         "result" | "failure" | "tool-result" | "answer" => egui::Color32::from_rgb(82, 211, 158),
         "enables" => egui::Color32::from_rgb(239, 190, 75),
         "delegation" | "route" | "request" => egui::Color32::from_rgb(76, 185, 224),
+        "peer" | "peer-result" => egui::Color32::from_rgb(236, 190, 74),
         "tool" => egui::Color32::from_rgb(152, 162, 175),
         "allowed" => egui::Color32::from_rgb(54, 61, 69),
         _ => egui::Color32::from_rgb(116, 137, 159),
     }
+}
+
+const MAX_ANIMATED_LIVE_EDGES: usize = 4;
+const LIVE_MARKER_VIEWPORTS_PER_SECOND: f32 = 0.04;
+
+/// Select a bounded set of motion traces without hiding any active lane.
+///
+/// Human tracking capacity is limited even when the underlying orchestration
+/// is not. Every active edge remains bright and thick; only this stable,
+/// selection-aware subset receives a moving marker. Incident edges of the
+/// inspected node win, followed by newer work and then durable edge identity.
+fn animated_thinking_edges(
+    turn: &ThinkingTurn,
+    selected: Option<&str>,
+    limit: usize,
+) -> HashSet<String> {
+    let mut candidates: Vec<_> = turn
+        .edges
+        .values()
+        .filter(|edge| edge.active > 0 && !is_allowed_edge(&edge.kind))
+        .collect();
+    candidates.sort_by(|left, right| {
+        let left_incident = selected.is_some_and(|id| left.from == id || left.to == id);
+        let right_incident = selected.is_some_and(|id| right.from == id || right.to == id);
+        right_incident
+            .cmp(&left_incident)
+            .then_with(|| right.started_at_ms.cmp(&left.started_at_ms))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    candidates
+        .into_iter()
+        .take(limit)
+        .map(|edge| edge.id.clone())
+        .collect()
+}
+
+fn is_allowed_edge(kind: &str) -> bool {
+    kind == "allowed" || kind == "allowed-peer"
 }
 
 /// Route a read-only edge between the nearest points on two node rectangles.
@@ -2446,6 +3306,7 @@ fn thinking_edge_color(kind: &str) -> egui::Color32 {
 /// valid walk around one side of that node's expanded rectangle. Repeating the
 /// operation handles multiple blockers without relying on vertical sockets,
 /// which would impose a false flow axis on radial layouts.
+#[cfg(test)]
 fn route_between_rects(
     from_id: NodeId,
     from: egui::Rect,
@@ -2506,6 +3367,86 @@ fn route_between_rects(
     points
 }
 
+/// Round polyline corners only when the sampled curve retains deterministic
+/// clearance from every unrelated node. Quadratic Bézier samples remain a
+/// polyline for exact arrow placement, dashes, hit testing, and screenshots.
+#[cfg(test)]
+fn rounded_obstacle_safe_route(
+    points: &[egui::Pos2],
+    obstacles: &[egui::Rect],
+    clearance: f32,
+    preferred_radius: f32,
+) -> Vec<egui::Pos2> {
+    if points.len() < 3 {
+        return points.to_vec();
+    }
+    let expanded: Vec<_> = obstacles
+        .iter()
+        .map(|rect| rect.expand(clearance))
+        .collect();
+    let mut radius = preferred_radius;
+    for _ in 0..5 {
+        let candidate = sample_rounded_polyline(points, radius, 6);
+        let collision = candidate.windows(2).any(|segment| {
+            expanded
+                .iter()
+                .any(|rect| segment_rect_entry(segment[0], segment[1], *rect).is_some())
+        });
+        if !collision {
+            return candidate;
+        }
+        radius *= 0.5;
+    }
+    points.to_vec()
+}
+
+#[cfg(test)]
+fn sample_rounded_polyline(
+    points: &[egui::Pos2],
+    radius: f32,
+    samples_per_corner: usize,
+) -> Vec<egui::Pos2> {
+    let mut result = Vec::with_capacity(points.len() * (samples_per_corner + 1));
+    result.push(points[0]);
+    for index in 1..points.len() - 1 {
+        let previous = points[index - 1];
+        let corner = points[index];
+        let next = points[index + 1];
+        let incoming = corner - previous;
+        let outgoing = next - corner;
+        let incoming_length = incoming.length();
+        let outgoing_length = outgoing.length();
+        if incoming_length <= f32::EPSILON || outgoing_length <= f32::EPSILON {
+            continue;
+        }
+        let local_radius = radius
+            .min(incoming_length * 0.36)
+            .min(outgoing_length * 0.36);
+        let entry = corner - incoming / incoming_length * local_radius;
+        let exit = corner + outgoing / outgoing_length * local_radius;
+        if result.last().is_none_or(|point| *point != entry) {
+            result.push(entry);
+        }
+        for sample in 1..=samples_per_corner {
+            let t = sample as f32 / samples_per_corner as f32;
+            let one_minus_t = 1.0 - t;
+            let point = egui::pos2(
+                one_minus_t * one_minus_t * entry.x
+                    + 2.0 * one_minus_t * t * corner.x
+                    + t * t * exit.x,
+                one_minus_t * one_minus_t * entry.y
+                    + 2.0 * one_minus_t * t * corner.y
+                    + t * t * exit.y,
+            );
+            result.push(point);
+        }
+    }
+    result.push(*points.last().expect("non-empty rounded polyline"));
+    result.dedup();
+    result
+}
+
+#[cfg(test)]
 fn rect_ray_anchor(rect: egui::Rect, toward: egui::Pos2) -> egui::Pos2 {
     let center = rect.center();
     let direction = toward - center;
@@ -2526,6 +3467,7 @@ fn rect_ray_anchor(rect: egui::Rect, toward: egui::Pos2) -> egui::Pos2 {
     center + direction * x_scale.min(y_scale)
 }
 
+#[cfg(test)]
 fn segment_rect_entry(p: egui::Pos2, q: egui::Pos2, rect: egui::Rect) -> Option<f32> {
     let direction = q - p;
     let mut entry = 0.0_f32;
@@ -2581,13 +3523,14 @@ fn short_id(value: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        alt_native_gui_wake, arrow_head, assign_edge_ports, metadata_height_budget,
-        pixel_perfect_scene_zoom_range, point_along_polyline, rect_ray_anchor,
-        reflow_definition_for_display, route_between_rects, sample_polyline, segment_rect_entry,
-        tangent_annotation, thinking_fingerprint, thinking_node_id, thinking_routes,
-        thinking_routing_fingerprint, CallEdge, DraftAssignment, DraftMember, LiveRegistration,
-        ModelChoice, PortEdge, RuntimeCapabilities, Selection, TeamApp, TeamDraft, ThinkingEdge,
-        ThinkingNode, ThinkingProjection, ThinkingTurn,
+        alt_native_gui_wake, animated_thinking_edges, arrow_head, assign_edge_ports,
+        metadata_height_budget, pixel_perfect_scene_zoom_range, point_along_polyline,
+        rect_ray_anchor, reflow_definition_for_display, rounded_obstacle_safe_route,
+        route_between_rects, sample_polyline, segment_rect_entry, tangent_annotation,
+        thinking_fingerprint, thinking_node_id, thinking_routes, thinking_routing_fingerprint,
+        CallEdge, DraftAssignment, DraftMember, LiveRegistration, ModelChoice, PeerEdge, PortEdge,
+        RuntimeCapabilities, Selection, TeamApp, TeamDraft, TeamView, ThinkingApp, ThinkingEdge,
+        ThinkingNode, ThinkingProjection, ThinkingTurn, ThinkingTurnSummary,
     };
     use egui_graph::NodeId;
     use std::collections::{BTreeMap, HashMap};
@@ -2605,6 +3548,346 @@ mod tests {
             }
             _ => {}
         }
+    }
+
+    fn dense_peer_draft() -> TeamDraft {
+        let model = |id: &str| ModelChoice {
+            route: "go".to_owned(),
+            id: id.to_owned(),
+        };
+        let member = |id: &str, role: &str| DraftMember {
+            id: id.to_owned(),
+            model: model(&format!("{id}-model")),
+            definition: format!(
+                "Own the bounded {role} contribution without taking over the request."
+            ),
+        };
+        TeamDraft {
+            id: "dense-peer-math".to_owned(),
+            name: "Dense Peer Geometry".to_owned(),
+            base_revision: 1,
+            gateway: "opencode".to_owned(),
+            router: DraftAssignment {
+                model: model("router-model"),
+                definition: "Choose one accountable Lead for the whole requested result."
+                    .to_owned(),
+            },
+            members: vec![
+                member("systems-lead", "system-design"),
+                member("research-lead", "evidence-led research"),
+                member("product-lead", "product outcome"),
+                member("operations-lead", "operational reliability"),
+                member("evidence", "evidence"),
+                member("runtime", "runtime"),
+                member("human", "human interaction"),
+                member("adversarial", "adversarial review"),
+                member("recovery", "recovery"),
+                member("economics", "economics"),
+                member("synthesis", "cross-finding synthesis"),
+                member("domain", "domain expertise"),
+            ],
+            router_edges: [
+                "systems-lead",
+                "research-lead",
+                "product-lead",
+                "operations-lead",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            call_edges: [
+                ("systems-lead", "runtime"),
+                ("systems-lead", "recovery"),
+                ("systems-lead", "domain"),
+                ("research-lead", "evidence"),
+                ("research-lead", "economics"),
+                ("product-lead", "human"),
+                ("product-lead", "economics"),
+                ("operations-lead", "recovery"),
+                ("operations-lead", "adversarial"),
+            ]
+            .into_iter()
+            .map(|(lead_id, member_id)| CallEdge {
+                lead_id: lead_id.to_owned(),
+                member_id: member_id.to_owned(),
+            })
+            .collect(),
+            peer_edges: [
+                ("systems-lead", "evidence"),
+                ("systems-lead", "adversarial"),
+                ("systems-lead", "synthesis"),
+                ("research-lead", "domain"),
+                ("research-lead", "synthesis"),
+                ("research-lead", "human"),
+                ("product-lead", "evidence"),
+                ("product-lead", "runtime"),
+                ("product-lead", "synthesis"),
+                ("operations-lead", "runtime"),
+                ("operations-lead", "domain"),
+                ("operations-lead", "human"),
+            ]
+            .into_iter()
+            .map(|(lead_id, member_id)| PeerEdge {
+                lead_id: lead_id.to_owned(),
+                member_id: member_id.to_owned(),
+            })
+            .collect(),
+        }
+    }
+
+    #[test]
+    fn dense_peer_graph_preserves_authority_ranks_and_matches_snapshot() {
+        let app = TeamApp::new(
+            0,
+            dense_peer_draft(),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            String::new(),
+            TeamView::Inspect,
+            RuntimeCapabilities::default(),
+        );
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(eframe::egui::vec2(1600.0, 1000.0))
+            .wgpu()
+            .build_ui_state(|ui, app| app.update(ui), app);
+        harness.run();
+
+        let app = harness.state();
+        assert!(
+            app.show_all_edges,
+            "Inspect hid part of the Team by default"
+        );
+        assert_eq!(app.visible_graph_edges().len(), 25);
+        let router_y = app.view.layout[&super::router_node_id()].y;
+        let lead_y: Vec<_> = app.member_uids[..4]
+            .iter()
+            .map(|uid| app.view.layout[&NodeId::from_u64(*uid)].y)
+            .collect();
+        assert!(lead_y.iter().all(|y| *y > router_y));
+        assert_eq!(app.view.layout.len(), app.member_uids.len() + 1);
+        harness.snapshot("dense_peer_team_inspect");
+    }
+
+    #[test]
+    fn dense_lead_focus_reveals_one_overlapping_pool_without_erasing_context() {
+        let mut app = TeamApp::new(
+            0,
+            dense_peer_draft(),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            String::new(),
+            TeamView::Inspect,
+            RuntimeCapabilities::default(),
+        );
+        app.selection = Selection::Member(100);
+        app.show_all_edges = false;
+        assert_eq!(app.visible_graph_edges().len(), 7);
+        assert!(app.node_in_focus(NodeId::from_u64(100)));
+        assert!(app.node_in_focus(NodeId::from_u64(105)));
+        assert!(!app.node_in_focus(NodeId::from_u64(103)));
+
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(eframe::egui::vec2(1600.0, 1000.0))
+            .wgpu()
+            .build_ui_state(|ui, app| app.update(ui), app);
+        harness.run();
+        harness.snapshot("dense_peer_team_focus");
+    }
+
+    #[test]
+    fn floating_inspector_never_swallow_the_graph_and_escape_closes_it() {
+        let mut app = TeamApp::new(
+            0,
+            dense_peer_draft(),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            String::new(),
+            TeamView::Inspect,
+            RuntimeCapabilities::default(),
+        );
+        app.inspector_open = true;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(eframe::egui::vec2(2048.0, 1152.0))
+            .wgpu()
+            .build_ui_state(|ui, app| app.update(ui), app);
+        harness.run();
+        assert!(harness.state().inspector_open);
+        assert!(harness.state().graph_screen_rect.width() > 1_900.0);
+        harness.snapshot("wide_team_inspector");
+
+        harness.key_press(eframe::egui::Key::Escape);
+        harness.run();
+        assert!(!harness.state().inspector_open);
+        assert!(harness.state().graph_screen_rect.width() > 1_900.0);
+    }
+
+    #[test]
+    fn graph_ports_are_programmatically_draggable_and_targets_are_forgiving() {
+        let model = |id: &str| ModelChoice {
+            route: "go".to_owned(),
+            id: id.to_owned(),
+        };
+        let draft = TeamDraft {
+            id: "gesture-test".to_owned(),
+            name: "Gesture Test".to_owned(),
+            base_revision: 1,
+            gateway: "opencode".to_owned(),
+            router: DraftAssignment {
+                model: model("router"),
+                definition: "Choose the accountable Lead.".to_owned(),
+            },
+            members: vec![
+                DraftMember {
+                    id: "lead".to_owned(),
+                    model: model("lead"),
+                    definition: "Own the result.".to_owned(),
+                },
+                DraftMember {
+                    id: "contributor".to_owned(),
+                    model: model("contributor"),
+                    definition: "Return bounded findings.".to_owned(),
+                },
+                DraftMember {
+                    id: "other-lead".to_owned(),
+                    model: model("other-lead"),
+                    definition: "Own another class of result.".to_owned(),
+                },
+            ],
+            router_edges: vec!["lead".to_owned(), "other-lead".to_owned()],
+            call_edges: vec![],
+            peer_edges: vec![],
+        };
+        let app = TeamApp::new(
+            0,
+            draft,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            String::new(),
+            TeamView::Edit,
+            RuntimeCapabilities::default(),
+        );
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(eframe::egui::vec2(1200.0, 820.0))
+            .wgpu()
+            .build_ui_state(|ui, app| app.update(ui), app);
+        harness.run();
+
+        let lead = NodeId::from_u64(harness.state().member_uids[0]);
+        let contributor = NodeId::from_u64(harness.state().member_uids[1]);
+        let (start_in_graph, target_in_graph) =
+            egui_graph::with_graph_memory(&harness.ctx, super::team_graph_id(), |memory| {
+                let (start, start_normal) = memory.node_sockets()[&lead].output(0).unwrap();
+                let (target, target_normal) = memory.node_sockets()[&contributor].input(0).unwrap();
+                (start + start_normal * 8.0, target + target_normal * 10.0)
+            });
+        let start = harness.state().graph_to_screen(start_in_graph);
+        let target = harness.state().graph_to_screen(target_in_graph);
+        harness.hover_at(start);
+        harness.step();
+        harness.drag_at(start);
+        harness.step();
+        assert!(harness.state().edge_in_progress.is_some());
+        harness.hover_at(start.lerp(target, 0.55));
+        harness.step();
+        harness.snapshot("team_live_connection_drag");
+
+        // Deliberately miss the small painted semicircle while remaining in
+        // egui_graph's larger interaction radius.
+        harness.hover_at(target);
+        harness.drop_at(target);
+        harness.run();
+        assert_eq!(harness.state().draft.call_edges.len(), 1);
+        assert_eq!(harness.state().draft.call_edges[0].lead_id, "lead");
+        assert_eq!(harness.state().draft.call_edges[0].member_id, "contributor");
+    }
+
+    #[test]
+    fn editable_team_drag_cannot_overlap_another_node() {
+        let model = |id: &str| ModelChoice {
+            route: "go".to_owned(),
+            id: id.to_owned(),
+        };
+        let draft = TeamDraft {
+            id: "collision-test".to_owned(),
+            name: "Collision Test".to_owned(),
+            base_revision: 1,
+            gateway: "opencode".to_owned(),
+            router: DraftAssignment {
+                model: model("router"),
+                definition: "Choose the accountable Lead.".to_owned(),
+            },
+            members: vec![
+                DraftMember {
+                    id: "one".to_owned(),
+                    model: model("one"),
+                    definition: "First member.".to_owned(),
+                },
+                DraftMember {
+                    id: "two".to_owned(),
+                    model: model("two"),
+                    definition: "Second member.".to_owned(),
+                },
+            ],
+            router_edges: vec!["one".to_owned(), "two".to_owned()],
+            call_edges: vec![],
+            peer_edges: vec![],
+        };
+        let app = TeamApp::new(
+            0,
+            draft,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            String::new(),
+            TeamView::Edit,
+            RuntimeCapabilities::default(),
+        );
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(eframe::egui::vec2(1200.0, 820.0))
+            .wgpu()
+            .build_ui_state(|ui, app| app.update(ui), app);
+        harness.run();
+
+        let one = NodeId::from_u64(harness.state().member_uids[0]);
+        let two = NodeId::from_u64(harness.state().member_uids[1]);
+        let sizes = egui_graph::with_graph_memory(&harness.ctx, super::team_graph_id(), |memory| {
+            memory.node_sizes().clone()
+        });
+        let one_center = harness
+            .state()
+            .graph_to_screen(harness.state().view.layout[&one] + sizes[&one] * 0.5);
+        let two_center = harness
+            .state()
+            .graph_to_screen(harness.state().view.layout[&two] + sizes[&two] * 0.5);
+        harness.hover_at(one_center);
+        harness.drag_at(one_center);
+        harness.step();
+        harness.hover_at(two_center);
+        harness.step();
+        harness.drop_at(two_center);
+        harness.run();
+
+        let one_rect =
+            eframe::egui::Rect::from_min_size(harness.state().view.layout[&one], sizes[&one]);
+        let two_rect =
+            eframe::egui::Rect::from_min_size(harness.state().view.layout[&two], sizes[&two]);
+        let overlaps = one_rect.min.x < two_rect.max.x
+            && two_rect.min.x < one_rect.max.x
+            && one_rect.min.y < two_rect.max.y
+            && two_rect.min.y < one_rect.max.y;
+        assert!(
+            !overlaps,
+            "dragged node overlapped its target: {one_rect:?} {two_rect:?}"
+        );
     }
 
     #[test]
@@ -2672,10 +3955,41 @@ mod tests {
     }
 
     #[test]
+    fn rounded_read_only_route_preserves_expanded_obstacle_clearance() {
+        let from_id = NodeId::from_u64(1);
+        let blocker_id = NodeId::from_u64(2);
+        let to_id = NodeId::from_u64(3);
+        let from = eframe::egui::Rect::from_min_size(
+            eframe::egui::pos2(0.0, 80.0),
+            eframe::egui::vec2(90.0, 60.0),
+        );
+        let blocker = eframe::egui::Rect::from_min_size(
+            eframe::egui::pos2(150.0, 60.0),
+            eframe::egui::vec2(100.0, 100.0),
+        );
+        let to = eframe::egui::Rect::from_min_size(
+            eframe::egui::pos2(320.0, 80.0),
+            eframe::egui::vec2(90.0, 60.0),
+        );
+        let nodes = [(from_id, from), (blocker_id, blocker), (to_id, to)];
+        let polyline = route_between_rects(from_id, from, to_id, to, &nodes);
+        let rounded = rounded_obstacle_safe_route(&polyline, &[blocker], 7.0, 20.0);
+        assert_eq!(rounded.first(), polyline.first());
+        assert_eq!(rounded.last(), polyline.last());
+        assert!(rounded.len() > polyline.len());
+        assert!(rounded.windows(2).all(|segment| {
+            segment_rect_entry(segment[0], segment[1], blocker.expand(7.0)).is_none()
+        }));
+        assert_eq!(
+            rounded,
+            rounded_obstacle_safe_route(&polyline, &[blocker], 7.0, 20.0)
+        );
+    }
+
+    #[test]
     fn read_only_team_surface_renders_content_without_authoring_controls() {
         super::TEST_HOST_EXCHANGES.store(0, std::sync::atomic::Ordering::SeqCst);
         let model = |id: &str| ModelChoice {
-            gateway: "opencode".to_owned(),
             route: "zen".to_owned(),
             id: id.to_owned(),
         };
@@ -2683,6 +3997,7 @@ mod tests {
             id: "inspection-team".to_owned(),
             name: "Inspection Team".to_owned(),
             base_revision: 4,
+            gateway: "opencode".to_owned(),
             router: DraftAssignment {
                 model: model("inspect-router"),
                 definition: "Route using the assignment definitions.".to_owned(),
@@ -2692,40 +4007,53 @@ mod tests {
                     id: "engineering".to_owned(),
                     model: model("inspect-engineer"),
                     definition: "Own implementation.".to_owned(),
-                    lead: true,
                 },
                 DraftMember {
                     id: "research".to_owned(),
                     model: model("inspect-researcher"),
                     definition: "Establish external evidence.".to_owned(),
-                    lead: true,
+                },
+                DraftMember {
+                    id: "engineering-specialist".to_owned(),
+                    model: model("inspect-engineering-specialist"),
+                    definition: "Return bounded implementation findings.".to_owned(),
+                },
+                DraftMember {
+                    id: "research-specialist".to_owned(),
+                    model: model("inspect-research-specialist"),
+                    definition: "Return bounded evidence findings.".to_owned(),
                 },
             ],
+            router_edges: vec!["engineering".to_owned(), "research".to_owned()],
             call_edges: vec![
                 CallEdge {
                     lead_id: "engineering".to_owned(),
-                    member_id: "research".to_owned(),
+                    member_id: "research-specialist".to_owned(),
                 },
                 CallEdge {
                     lead_id: "research".to_owned(),
-                    member_id: "engineering".to_owned(),
+                    member_id: "engineering-specialist".to_owned(),
                 },
             ],
+            peer_edges: vec![],
         };
         let mut app = TeamApp::new(
             0,
             draft,
             vec![],
             vec![],
+            vec![],
+            vec![],
             String::new(),
-            true,
+            TeamView::Inspect,
             RuntimeCapabilities::default(),
         );
         assert_eq!(
             app.visible_graph_edges().len(),
-            2,
-            "overview should project only Router edges"
+            4,
+            "Inspect should initially expose the complete Team architecture"
         );
+        app.show_all_edges = false;
         app.selection = Selection::Member(100);
         let focused = app.visible_graph_edges();
         assert_eq!(
@@ -2737,10 +4065,10 @@ mod tests {
         assert!(!focused.iter().any(|edge| edge.key == "router:research"));
         assert!(focused
             .iter()
-            .any(|edge| edge.key == "call:engineering:research"));
+            .any(|edge| edge.key == "call:engineering:research-specialist"));
         assert!(!focused
             .iter()
-            .any(|edge| edge.key == "call:research:engineering"));
+            .any(|edge| edge.key == "call:research:engineering-specialist"));
         app.show_all_edges = true;
         assert_eq!(
             app.visible_graph_edges().len(),
@@ -2748,7 +4076,6 @@ mod tests {
             "explicit exhaustive mode should expose every stored edge"
         );
         app.selection = Selection::Router;
-        app.show_all_edges = false;
         let context = eframe::egui::Context::default();
         let output = context.run_ui(
             eframe::egui::RawInput {
@@ -2767,11 +4094,10 @@ mod tests {
         for expected in [
             "Inspection Team",
             "inspection-team@4",
-            "READ ONLY",
-            "Show all edges",
-            "Router",
+            "Inspect Team",
+            "Focus selection",
+            "Details",
             "inspect-router",
-            "Route using the assignment definitions.",
             "engineering",
             "research",
         ] {
@@ -2796,7 +4122,6 @@ mod tests {
     #[test]
     fn editable_inspector_consumes_mouse_wheel_and_reaches_lower_fields() {
         let model = ModelChoice {
-            gateway: "opencode".to_owned(),
             route: "zen".to_owned(),
             id: "model".to_owned(),
         };
@@ -2804,6 +4129,7 @@ mod tests {
             id: "team-generated-id".to_owned(),
             name: "Scrollable Team".to_owned(),
             base_revision: 0,
+            gateway: "opencode".to_owned(),
             router: DraftAssignment {
                 model: model.clone(),
                 definition: String::new(),
@@ -2812,17 +4138,20 @@ mod tests {
                 id: "engineering".to_owned(),
                 model,
                 definition: "A long editable definition.\n".repeat(30),
-                lead: true,
             }],
+            router_edges: vec!["engineering".to_owned()],
             call_edges: vec![],
+            peer_edges: vec![],
         };
         let mut app = TeamApp::new(
             0,
             draft,
             vec![],
             vec![],
+            vec![],
+            vec![],
             String::new(),
-            false,
+            TeamView::New,
             RuntimeCapabilities::default(),
         );
         app.selection = Selection::Member(100);
@@ -2877,7 +4206,6 @@ mod tests {
     #[test]
     fn editable_and_read_only_team_modes_share_exact_layout_engine_result() {
         let model = |id: &str| ModelChoice {
-            gateway: "opencode".to_owned(),
             route: "zen".to_owned(),
             id: id.to_owned(),
         };
@@ -2885,6 +4213,7 @@ mod tests {
             id: "free".to_owned(),
             name: "Free".to_owned(),
             base_revision: 1,
+            gateway: "opencode".to_owned(),
             router: DraftAssignment {
                 model: model("big-pickle"),
                 definition: "Route between the two Leads.".to_owned(),
@@ -2894,33 +4223,37 @@ mod tests {
                     id: "engineering".to_owned(),
                     model: model("deepseek-v4-flash-free"),
                     definition: "Own engineering.".to_owned(),
-                    lead: true,
                 },
                 DraftMember {
                     id: "research".to_owned(),
                     model: model("laguna-s-2.1-free"),
                     definition: "Own research.".to_owned(),
-                    lead: true,
+                },
+                DraftMember {
+                    id: "specialist".to_owned(),
+                    model: model("mimo-v2.5-free"),
+                    definition: "Return bounded findings.".to_owned(),
                 },
             ],
-            call_edges: vec![
-                CallEdge {
-                    lead_id: "engineering".to_owned(),
-                    member_id: "research".to_owned(),
-                },
-                CallEdge {
-                    lead_id: "research".to_owned(),
-                    member_id: "engineering".to_owned(),
-                },
-            ],
+            router_edges: vec!["engineering".to_owned(), "research".to_owned()],
+            call_edges: vec![CallEdge {
+                lead_id: "engineering".to_owned(),
+                member_id: "specialist".to_owned(),
+            }],
+            peer_edges: vec![PeerEdge {
+                lead_id: "research".to_owned(),
+                member_id: "specialist".to_owned(),
+            }],
         };
         let mut editor = TeamApp::new(
             0,
             draft.clone(),
             vec![],
             vec![],
+            vec![],
+            vec![],
             String::new(),
-            false,
+            TeamView::Edit,
             RuntimeCapabilities::default(),
         );
         let mut inspector = TeamApp::new(
@@ -2928,8 +4261,10 @@ mod tests {
             draft,
             vec![],
             vec![],
+            vec![],
+            vec![],
             String::new(),
-            true,
+            TeamView::Inspect,
             RuntimeCapabilities::default(),
         );
         let context = eframe::egui::Context::default();
@@ -3063,6 +4398,272 @@ mod tests {
             reversed_annotation.angle.abs() <= std::f32::consts::FRAC_PI_2,
             "text was allowed to render upside down"
         );
+    }
+
+    #[test]
+    fn live_parallel_collaboration_has_a_stable_readable_snapshot() {
+        let node = |id: &str, kind: &str, label: &str, status: &str, lead: bool| -> ThinkingNode {
+            ThinkingNode {
+                id: id.to_owned(),
+                kind: kind.to_owned(),
+                label: label.to_owned(),
+                status: status.to_owned(),
+                actor: String::new(),
+                metadata: if lead {
+                    BTreeMap::from([("lead".to_owned(), "true".to_owned())])
+                } else {
+                    BTreeMap::new()
+                },
+            }
+        };
+        let edge = |id: &str,
+                    from: &str,
+                    to: &str,
+                    kind: &str,
+                    direction: &str,
+                    status: &str,
+                    active: usize|
+         -> ThinkingEdge {
+            ThinkingEdge {
+                id: id.to_owned(),
+                from: from.to_owned(),
+                to: to.to_owned(),
+                kind: kind.to_owned(),
+                direction: direction.to_owned(),
+                status: status.to_owned(),
+                count: 1,
+                active,
+                started_at_ms: 0,
+                metadata: BTreeMap::new(),
+            }
+        };
+        let active = ThinkingTurn {
+            id: "turn:parallel".to_owned(),
+            ordinal: 1,
+            task: "Assess a design while runtime and evidence work proceed concurrently."
+                .to_owned(),
+            status: "running".to_owned(),
+            sequence: 12,
+            nodes: BTreeMap::from([
+                (
+                    "user".to_owned(),
+                    node("user", "user", "You", "completed", false),
+                ),
+                (
+                    "router".to_owned(),
+                    node("router", "router", "Router", "completed", false),
+                ),
+                (
+                    "member:systems".to_owned(),
+                    node("member:systems", "member", "systems-lead", "running", true),
+                ),
+                (
+                    "member:research".to_owned(),
+                    node("member:research", "member", "research-lead", "idle", true),
+                ),
+                (
+                    "member:runtime".to_owned(),
+                    node("member:runtime", "member", "runtime", "running", false),
+                ),
+                (
+                    "member:evidence".to_owned(),
+                    node("member:evidence", "member", "evidence", "running", false),
+                ),
+                (
+                    "tool:terminal".to_owned(),
+                    node("tool:terminal", "tool", "terminal", "running", false),
+                ),
+            ]),
+            edges: BTreeMap::from([
+                (
+                    "allowed:router:systems".to_owned(),
+                    edge(
+                        "allowed:router:systems",
+                        "router",
+                        "member:systems",
+                        "allowed",
+                        "outward",
+                        "idle",
+                        0,
+                    ),
+                ),
+                (
+                    "allowed:router:research".to_owned(),
+                    edge(
+                        "allowed:router:research",
+                        "router",
+                        "member:research",
+                        "allowed",
+                        "outward",
+                        "idle",
+                        0,
+                    ),
+                ),
+                (
+                    "allowed:systems:runtime".to_owned(),
+                    edge(
+                        "allowed:systems:runtime",
+                        "member:systems",
+                        "member:runtime",
+                        "allowed",
+                        "outward",
+                        "idle",
+                        0,
+                    ),
+                ),
+                (
+                    "allowed-peer:systems:evidence".to_owned(),
+                    edge(
+                        "allowed-peer:systems:evidence",
+                        "member:systems",
+                        "member:evidence",
+                        "allowed-peer",
+                        "bidirectional",
+                        "idle",
+                        0,
+                    ),
+                ),
+                (
+                    "flow:request".to_owned(),
+                    edge(
+                        "flow:request",
+                        "user",
+                        "router",
+                        "request",
+                        "outward",
+                        "completed",
+                        0,
+                    ),
+                ),
+                (
+                    "flow:route".to_owned(),
+                    edge(
+                        "flow:route",
+                        "router",
+                        "member:systems",
+                        "route",
+                        "outward",
+                        "completed",
+                        0,
+                    ),
+                ),
+                (
+                    "flow:delegation".to_owned(),
+                    edge(
+                        "flow:delegation",
+                        "member:systems",
+                        "member:runtime",
+                        "delegation",
+                        "outward",
+                        "running",
+                        1,
+                    ),
+                ),
+                (
+                    "flow:peer".to_owned(),
+                    edge(
+                        "flow:peer",
+                        "member:systems",
+                        "member:evidence",
+                        "peer",
+                        "bidirectional",
+                        "running",
+                        1,
+                    ),
+                ),
+                (
+                    "flow:tool".to_owned(),
+                    edge(
+                        "flow:tool",
+                        "member:runtime",
+                        "tool:terminal",
+                        "tool",
+                        "outward",
+                        "running",
+                        1,
+                    ),
+                ),
+            ]),
+        };
+        let state = ThinkingProjection {
+            session_id: "session:visual-audit".to_owned(),
+            active_turn_id: active.id.clone(),
+            revision: 12,
+            turns: vec![ThinkingTurnSummary {
+                id: active.id.clone(),
+                ordinal: active.ordinal,
+                task: active.task.clone(),
+                status: active.status.clone(),
+                sequence: active.sequence,
+            }],
+            active,
+        };
+        let context = eframe::egui::Context::default();
+        let mut app = ThinkingApp::new(
+            0,
+            state,
+            RuntimeCapabilities::default(),
+            String::new(),
+            &context,
+        );
+        // The fixture is already the latest durable projection; no host
+        // exchange is needed to render it in the isolated visual audit.
+        app.observed_generation = 0;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(eframe::egui::vec2(1600.0, 1000.0))
+            .wgpu()
+            .build_ui_state(|ui, app| app.show(ui), app);
+        harness.run_steps(5);
+        assert!(!harness.state().inspector_open);
+        for edge in [
+            "flow:request",
+            "flow:route",
+            "flow:delegation",
+            "flow:peer",
+            "flow:tool",
+        ] {
+            assert!(
+                harness.state().routes.path(edge).is_some(),
+                "missing routed live edge {edge}"
+            );
+        }
+        harness.snapshot("thinking_parallel_collaboration");
+    }
+
+    #[test]
+    fn live_motion_budget_prioritizes_the_inspected_lane() {
+        let make_edge = |index: usize| ThinkingEdge {
+            id: format!("edge:{index}"),
+            from: if index == 5 {
+                "selected".to_owned()
+            } else {
+                "source".to_owned()
+            },
+            to: format!("target:{index}"),
+            kind: "delegation".to_owned(),
+            direction: "outward".to_owned(),
+            status: "running".to_owned(),
+            count: 1,
+            active: 1,
+            started_at_ms: index as i64,
+            metadata: BTreeMap::new(),
+        };
+        let turn = ThinkingTurn {
+            edges: (0..6)
+                .map(|index| {
+                    let edge = make_edge(index);
+                    (edge.id.clone(), edge)
+                })
+                .collect(),
+            ..ThinkingTurn::default()
+        };
+        let selected = animated_thinking_edges(&turn, Some("selected"), 4);
+        assert_eq!(selected.len(), 4);
+        assert!(selected.contains("edge:5"));
+        assert!(selected.contains("edge:4"));
+        assert!(selected.contains("edge:3"));
+        assert!(selected.contains("edge:2"));
+        assert!(!selected.contains("edge:0"));
     }
 
     #[test]

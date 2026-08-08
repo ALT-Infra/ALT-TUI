@@ -1,21 +1,25 @@
 schema: 1
 id: free
-revision: 1
+revision: 3
 name: Free
+gateway: opencode
 
 models:
   router:
-    gateway: opencode
     route: zen
     name: big-pickle
   engineering:
-    gateway: opencode
     route: zen
     name: deepseek-v4-flash-free
   research:
-    gateway: opencode
     route: zen
     name: laguna-s-2.1-free
+  evidence:
+    route: zen
+    name: mimo-v2.5-free
+  technical:
+    route: zen
+    name: north-mini-code-free
 
 router:
   model: router
@@ -35,11 +39,9 @@ leads:
       system design, implementation, verification, or a technical explanation.
       Inspect and change the actual workspace when required, distinguish observed
       behavior from claims, and verify the result in proportion to risk.
-      Engineering remains accountable for the complete user-facing result. It may
-      call Research with a bounded, self-contained question when current external
-      evidence would materially improve that result.
-    calls:
-      - research
+      Engineering remains accountable for the complete user-facing result.
+    calls: [evidence-specialist]
+    peers: [evidence-specialist]
 
   - id: research
     model: research
@@ -48,12 +50,19 @@ leads:
       current external evidence: investigations, comparisons, source audits, or
       recommendations. Prefer primary sources, distinguish fact from inference,
       expose contradictions and uncertainty, and produce a conclusion rather than
-      a source dump. Research remains accountable for the complete user-facing
-      result. It may call Engineering with a bounded, self-contained technical
-      question when implementation or system evidence would materially improve
-      the investigation.
-    calls:
-      - engineering
+      a source dump. Research remains accountable for the complete user-facing result.
+    calls: [technical-specialist]
+    peers: [technical-specialist]
+
+members:
+  - id: evidence-specialist
+    model: evidence
+    definition: |
+      Investigate a bounded question and return the evidence, contradictions, and uncertainty the responsible Lead needs. Do not take ownership of the whole request.
+  - id: technical-specialist
+    model: technical
+    definition: |
+      Examine a bounded technical question and return concrete implementation or system findings to the responsible Lead. Do not take ownership of the whole request.
 
 disclosure:
   persist_provider_reasoning: true

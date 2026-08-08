@@ -191,6 +191,14 @@ func newTurn(id string, ordinal int, task string, started time.Time, p profile.P
 				Kind: "allowed", Direction: "outward", Status: Idle,
 			}
 		}
+		for _, peerID := range lead.Peers {
+			turn.ensureMember(peerID)
+			turn.Edges["allowed-peer:"+lead.ID+":"+peerID] = &Edge{
+				ID:   "allowed-peer:" + lead.ID + ":" + peerID,
+				From: memberID(lead.ID), To: memberID(peerID),
+				Kind: "allowed-peer", Direction: "bidirectional", Status: Idle,
+			}
+		}
 	}
 	for _, member := range p.Members {
 		turn.ensureMember(member.ID)
@@ -339,6 +347,83 @@ func (t *Turn) apply(item event.Event) error {
 			return err
 		}
 		actor := t.finishDelegation(data.DelegationID, Cancelled)
+		setMetadata(t.Nodes[memberID(actor)], "cancel_reason", data.Reason)
+	case event.PeerTurnCreated:
+		data, err := event.Decode[event.PeerTurnSpec](item)
+		if err != nil {
+			return err
+		}
+		t.ensureMember(data.PeerID)
+		t.delegationActors[data.ID] = data.PeerID
+		edgeID := t.flow(
+			"peer:"+data.CollaborationID,
+			memberID(t.selectedLead), memberID(data.PeerID),
+			"peer", "bidirectional", Queued, item.At, 0,
+		)
+		t.delegationEdges[data.ID] = edgeID
+		edge := t.Edges[edgeID]
+		setEdgeMetadata(edge, "objective", data.Objective)
+		setEdgeMetadata(edge, "context", data.Context)
+		setEdgeMetadata(edge, "collaboration_id", data.CollaborationID)
+		setEdgeMetadata(edge, "round", strconv.Itoa(data.Round))
+		setEdgeMetadata(edge, "peer_turn_id", data.ID)
+	case event.PeerTurnStarted:
+		data, err := event.Decode[event.PeerTurnStartedData](item)
+		if err != nil {
+			return err
+		}
+		actor := t.delegationActors[data.PeerTurnID]
+		if actor == "" {
+			actor = item.Actor
+			t.delegationActors[data.PeerTurnID] = actor
+		}
+		t.ensureMember(actor)
+		if !t.delegationRunning[data.PeerTurnID] {
+			t.delegationRunning[data.PeerTurnID] = true
+			t.actorActivity[actor]++
+		}
+		t.Nodes[memberID(actor)].Status = Running
+		if edge := t.Edges[t.delegationEdges[data.PeerTurnID]]; edge != nil {
+			if edge.Active == 0 {
+				edge.StartedAtMS = item.At.UnixMilli()
+			}
+			edge.Status, edge.Active, edge.OccurredAt = Running, edge.Active+1, item.At
+		}
+	case event.PeerTextDelta, event.PeerReasoning:
+		data, err := event.Decode[event.PeerTextDeltaData](item)
+		if err != nil {
+			return err
+		}
+		actor := t.delegationActors[data.PeerTurnID]
+		key := "response_stream"
+		if item.Kind == event.PeerReasoning {
+			key = "provider_reasoning"
+		}
+		appendMetadata(t.Nodes[memberID(actor)], key, data.Text)
+	case event.PeerTurnCompleted:
+		data, err := event.Decode[event.PeerTurnCompletedData](item)
+		if err != nil {
+			return err
+		}
+		actor := t.finishDelegation(data.PeerTurnID, Completed)
+		node := t.Nodes[memberID(actor)]
+		setMetadata(node, "peer_result", data.Result)
+		setMetadata(node, "findings", strings.Join(data.Findings, "\n"))
+		setMetadata(node, "confidence", strconv.FormatFloat(data.Confidence, 'f', 3, 64))
+		t.flow("peer-result:"+actor+":"+t.selectedLead, memberID(actor), memberID(t.selectedLead), "peer-result", "bidirectional", Completed, item.At, 0)
+	case event.PeerTurnFailed:
+		data, err := event.Decode[event.PeerTurnFailedData](item)
+		if err != nil {
+			return err
+		}
+		actor := t.finishDelegation(data.PeerTurnID, Failed)
+		setMetadata(t.Nodes[memberID(actor)], "error", data.Error)
+	case event.PeerTurnCancelled:
+		data, err := event.Decode[event.PeerTurnCancelledData](item)
+		if err != nil {
+			return err
+		}
+		actor := t.finishDelegation(data.PeerTurnID, Cancelled)
 		setMetadata(t.Nodes[memberID(actor)], "cancel_reason", data.Reason)
 	case event.ToolCalled:
 		data, err := event.Decode[event.ToolCallData](item)

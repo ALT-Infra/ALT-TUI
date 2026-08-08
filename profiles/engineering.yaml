@@ -1,21 +1,25 @@
 schema: 1
 id: engineering
-revision: 1
+revision: 3
 name: Engineering Team
+gateway: opencode
 
 models:
   router:
-    gateway: opencode
-    route: go
-    name: deepseek-v4-flash
+    route: zen
+    name: big-pickle
   engineering:
-    gateway: opencode
     route: go
     name: kimi-k3
   research:
-    gateway: opencode
     route: go
     name: grok-4.5
+  evidence:
+    route: go
+    name: deepseek-v4-pro
+  technical:
+    route: go
+    name: mimo-v2.5-pro
 router:
   model: router
   definition: |
@@ -28,15 +32,25 @@ leads:
       Give this Lead a request whose main result is working software or a sound engineering decision: designing, implementing, debugging, integrating, or making a technical system reliable. It remains responsible for the whole result, keeps one evolving plan, and delegates only questions for which another member can materially improve the work. A request that principally asks for a current comparison or an evidence-based investigation belongs with the Research Lead even when its subject is technical.
 
       As results arrive, reconsider what is needed rather than following an initial plan mechanically. Reconcile the evidence and return the working result or decision to the user.
-    calls:
-      - research-lead
+    calls: [research-specialist]
+    peers: [research-specialist]
 
   - id: research-lead
     model: research
     definition: |
       Give this Lead a request whose main difficulty is discovering what is currently true: an investigation, comparison, source audit, or recommendation that depends on external evidence and uncertainty reduction. It should distinguish fact from inference, prefer primary material, expose contradictions or missing evidence, and return a conclusion rather than a source dump. Work that principally asks to implement and test an already chosen approach belongs with the Engineering Lead.
-    calls:
-      - engineering-lead
+    calls: [technical-specialist]
+    peers: [technical-specialist]
+
+members:
+  - id: research-specialist
+    model: evidence
+    definition: |
+      Investigate a bounded question whose answer depends on external evidence. Return the material facts, sources, contradictions, and uncertainty needed by the responsible Lead; do not broaden the assignment into ownership of the whole request.
+  - id: technical-specialist
+    model: technical
+    definition: |
+      Examine a bounded technical question using the relevant implementation, runtime, or system evidence. Return concrete findings and tradeoffs to the responsible Lead without taking over the request.
 
 disclosure:
   persist_provider_reasoning: true

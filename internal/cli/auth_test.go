@@ -1,9 +1,28 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"strings"
 	"testing"
 )
+
+func TestAuthStatusWithoutNameSummarizesEveryConnection(t *testing.T) {
+	var out bytes.Buffer
+	err := Execute(
+		context.Background(),
+		[]string{"--data-dir", t.TempDir(), "auth", "status"},
+		strings.NewReader(""), &out, &out,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"exa", "cline", "fireworks", "opencode", "together", "zenmux"} {
+		if !strings.Contains(out.String(), id+": not configured") {
+			t.Fatalf("status omitted %s:\n%s", id, out.String())
+		}
+	}
+}
 
 func TestGatewayDescriptorRequiresChoiceWithMultipleGateways(t *testing.T) {
 	state := &commandState{dataDir: t.TempDir()}
@@ -13,7 +32,7 @@ func TestGatewayDescriptorRequiresChoiceWithMultipleGateways(t *testing.T) {
 	}
 	if !strings.Contains(
 		err.Error(),
-		"registered gateways: fireworks, opencode, together, zenmux",
+		"registered gateways: cline, fireworks, opencode, together, zenmux",
 	) {
 		t.Fatalf("error = %q", err)
 	}
@@ -42,7 +61,7 @@ func TestGatewayDescriptorNeverEchoesUnknownPositionalArgument(t *testing.T) {
 	}
 	if !strings.Contains(
 		err.Error(),
-		"registered gateways: fireworks, opencode, together, zenmux",
+		"registered gateways: cline, fireworks, opencode, together, zenmux",
 	) {
 		t.Fatalf("error = %q, want registry-derived guidance", err)
 	}
@@ -56,7 +75,7 @@ func TestGatewayDescriptorReportsRegistryForUnknownID(t *testing.T) {
 	}
 	if !strings.Contains(
 		err.Error(),
-		"registered gateways: fireworks, opencode, together, zenmux",
+		"registered gateways: cline, fireworks, opencode, together, zenmux",
 	) {
 		t.Fatalf("error = %q, want registry-derived guidance", err)
 	}

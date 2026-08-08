@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -37,6 +38,9 @@ func Parse(source []byte) (*Document, error) {
 	if err := ensureSingleDocument(decoder); err != nil {
 		return nil, err
 	}
+	if err := migrateLegacyGateways(&value); err != nil {
+		return nil, err
+	}
 	applyDefaults(&value)
 
 	sum := sha256.Sum256(source)
@@ -47,7 +51,27 @@ func Parse(source []byte) (*Document, error) {
 	}, nil
 }
 
+func migrateLegacyGateways(p *Profile) error {
+	gateway := p.Gateway
+	for alias, model := range p.Models {
+		legacy := model.LegacyGateway
+		if legacy != "" {
+			if gateway != "" && !strings.EqualFold(strings.TrimSpace(gateway), strings.TrimSpace(legacy)) {
+				return fmt.Errorf("decode team profile: legacy model %s belongs to gateway %q, not Team gateway %q", alias, legacy, gateway)
+			}
+			gateway = legacy
+		}
+		model.LegacyGateway = ""
+		p.Models[alias] = model
+	}
+	p.Gateway = strings.ToLower(strings.TrimSpace(gateway))
+	return nil
+}
+
 func FromValue(value Profile) (*Document, error) {
+	if err := migrateLegacyGateways(&value); err != nil {
+		return nil, err
+	}
 	source, err := yaml.Marshal(value)
 	if err != nil {
 		return nil, fmt.Errorf("encode team profile: %w", err)

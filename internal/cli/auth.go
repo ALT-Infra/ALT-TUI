@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os/exec"
+	"runtime"
 	"strings"
 
 	"altv1/internal/application"
@@ -33,13 +35,16 @@ func (s *commandState) authCommand() *cobra.Command {
 func (s *commandState) authSetCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:     "set <connection>",
-		Short:   "Securely store a gateway or research API key",
-		Example: "  alt auth set opencode\n  alt auth set exa",
+		Short:   "Configure a gateway or research connection",
+		Example: "  alt auth set opencode\n  alt auth set cline\n  alt auth set exa",
 		Args:    cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			connection, err := s.authConnection(args)
 			if err != nil {
 				return err
+			}
+			if connection.Authentication == provider.AuthenticationDeviceOAuth {
+				return s.authenticateDevice(connection)
 			}
 			credentials, err := s.credentialStore()
 			if err != nil {
@@ -75,7 +80,7 @@ func (s *commandState) authStatusCommand() *cobra.Command {
 		Short: "Check whether a connection credential is available",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			connection, err := s.authConnection(args)
+			available, err := s.authConnections()
 			if err != nil {
 				return err
 			}
@@ -83,15 +88,25 @@ func (s *commandState) authStatusCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_, source, err := credentials.Lookup(connection.ID, connection.CredentialEnvironment)
-			if err != nil {
-				if errors.Is(err, credential.ErrNotFound) {
-					fmt.Fprintf(s.out, "%s: not configured\n", connection.ID)
-					return nil
+			connections := available
+			if len(args) == 1 {
+				connection, err := findAuthConnection(available, args[0])
+				if err != nil {
+					return err
 				}
-				return err
+				connections = []authConnection{connection}
 			}
-			fmt.Fprintf(s.out, "%s: configured (%s)\n", connection.ID, source)
+			for _, connection := range connections {
+				_, source, lookupErr := credentials.Lookup(connection.ID, connection.CredentialEnvironment)
+				if errors.Is(lookupErr, credential.ErrNotFound) {
+					fmt.Fprintf(s.out, "%s: not configured\n", connection.ID)
+					continue
+				}
+				if lookupErr != nil {
+					return lookupErr
+				}
+				fmt.Fprintf(s.out, "%s: configured (%s)\n", connection.ID, source)
+			}
 			return nil
 		},
 	}
@@ -207,37 +222,45 @@ type authConnection struct {
 	ID                    string
 	Name                  string
 	CredentialEnvironment string
+	Authentication        provider.AuthenticationKind
 }
 
 func (s *commandState) authConnection(args []string) (authConnection, error) {
-	dataDir, err := application.ResolveDataDir(strings.TrimSpace(s.dataDir))
+	available, err := s.authConnections()
 	if err != nil {
 		return authConnection{}, err
+	}
+	if len(args) != 1 {
+		return authConnection{}, connectionRequiredError(available)
+	}
+	return findAuthConnection(available, args[0])
+}
+
+func (s *commandState) authConnections() ([]authConnection, error) {
+	dataDir, err := application.ResolveDataDir(strings.TrimSpace(s.dataDir))
+	if err != nil {
+		return nil, err
 	}
 	registry, err := application.NewGatewayRegistry(dataDir)
 	if err != nil {
-		return authConnection{}, err
+		return nil, err
 	}
 	available := []authConnection{{
 		ID: "exa", Name: "Exa web research", CredentialEnvironment: "EXA_API_KEY",
+		Authentication: provider.AuthenticationAPIKey,
 	}}
 	for _, descriptor := range registry.Descriptors() {
 		available = append(available, authConnection{
 			ID: descriptor.ID, Name: descriptor.Name,
 			CredentialEnvironment: descriptor.CredentialEnvironment,
+			Authentication:        descriptor.Authentication,
 		})
 	}
-	if len(args) != 1 {
-		names := make([]string, 0, len(available))
-		for _, item := range available {
-			names = append(names, item.ID)
-		}
-		return authConnection{}, fmt.Errorf(
-			"connection name is required; registered connections: %s",
-			strings.Join(names, ", "),
-		)
-	}
-	name := strings.ToLower(strings.TrimSpace(args[0]))
+	return available, nil
+}
+
+func findAuthConnection(available []authConnection, raw string) (authConnection, error) {
+	name := strings.ToLower(strings.TrimSpace(raw))
 	for _, item := range available {
 		if item.ID == name {
 			return item, nil
@@ -251,6 +274,68 @@ func (s *commandState) authConnection(args []string) (authConnection, error) {
 		"unsupported connection; registered connections: %s",
 		strings.Join(names, ", "),
 	)
+}
+
+func connectionRequiredError(available []authConnection) error {
+	names := make([]string, 0, len(available))
+	for _, item := range available {
+		names = append(names, item.ID)
+	}
+	return fmt.Errorf("connection name is required; registered connections: %s", strings.Join(names, ", "))
+}
+
+func (s *commandState) authenticateDevice(connection authConnection) error {
+	dataDir, err := application.ResolveDataDir(strings.TrimSpace(s.dataDir))
+	if err != nil {
+		return err
+	}
+	registry, err := application.NewGatewayRegistry(dataDir)
+	if err != nil {
+		return err
+	}
+	authenticator, err := registry.DeviceAuthenticator(connection.ID)
+	if err != nil {
+		return err
+	}
+	authorization, err := authenticator.BeginDeviceAuthorization(s.ctx)
+	if err != nil {
+		return err
+	}
+	verificationURL := authorization.VerificationURIComplete
+	if strings.TrimSpace(verificationURL) == "" {
+		verificationURL = authorization.VerificationURI
+	}
+	fmt.Fprintf(s.out, "Open %s\n", verificationURL)
+	fmt.Fprintf(s.out, "%s confirmation code: %s\n", connection.Name, authorization.UserCode)
+	if err := openBrowser(verificationURL); err != nil {
+		fmt.Fprintln(s.out, "Could not open a browser automatically; use the link above.")
+	}
+	lastProgress := ""
+	err = authenticator.CompleteDeviceAuthorization(s.ctx, authorization, func(message string) {
+		if message != lastProgress {
+			fmt.Fprintln(s.out, message+"…")
+			lastProgress = message
+		}
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(s.out, "signed in to %s; rotating account credentials stored securely\n", connection.Name)
+	return nil
+}
+
+func openBrowser(rawURL string) error {
+	var name string
+	var args []string
+	switch runtime.GOOS {
+	case "darwin":
+		name, args = "open", []string{rawURL}
+	case "windows":
+		name, args = "rundll32", []string{"url.dll,FileProtocolHandler", rawURL}
+	default:
+		name, args = "xdg-open", []string{rawURL}
+	}
+	return exec.Command(name, args...).Start()
 }
 
 func (s *commandState) gatewayDescriptor(args []string) (provider.GatewayDescriptor, error) {

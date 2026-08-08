@@ -31,6 +31,13 @@ const (
 	DelegationCompleted Kind = "delegation.completed"
 	DelegationFailed    Kind = "delegation.failed"
 	DelegationCancelled Kind = "delegation.cancelled"
+	PeerTurnCreated     Kind = "peer.turn.created"
+	PeerTurnStarted     Kind = "peer.turn.started"
+	PeerTextDelta       Kind = "peer.text.delta"
+	PeerReasoning       Kind = "peer.reasoning.delta"
+	PeerTurnCompleted   Kind = "peer.turn.completed"
+	PeerTurnFailed      Kind = "peer.turn.failed"
+	PeerTurnCancelled   Kind = "peer.turn.cancelled"
 	FinalStarted        Kind = "final.started"
 	FinalTextDelta      Kind = "final.text.delta"
 	FinalReasoning      Kind = "final.reasoning.delta"
@@ -123,8 +130,50 @@ type LeadDecisionData struct {
 	Turn          int              `json:"turn"`
 	Assessment    string           `json:"assessment"`
 	Delegations   []DelegationSpec `json:"delegations,omitempty"`
+	PeerTurns     []PeerTurnSpec   `json:"peer_turns,omitempty"`
 	Cancellations []string         `json:"cancellations,omitempty"`
 	WillFinalize  bool             `json:"will_finalize"`
+}
+
+type PeerTurnSpec struct {
+	ID              string   `json:"id"`
+	Key             string   `json:"key,omitempty"`
+	CollaborationID string   `json:"collaboration_id"`
+	PeerID          string   `json:"peer_id"`
+	Objective       string   `json:"objective"`
+	Context         string   `json:"context,omitempty"`
+	RequiredTools   []string `json:"required_tools,omitempty"`
+	Round           int      `json:"round"`
+}
+
+type PeerTurnStartedData struct {
+	PeerTurnID string `json:"peer_turn_id"`
+	Attempt    int    `json:"attempt"`
+}
+
+type PeerTextDeltaData struct {
+	PeerTurnID string `json:"peer_turn_id"`
+	Text       string `json:"text"`
+}
+
+type PeerTurnCompletedData struct {
+	PeerTurnID string   `json:"peer_turn_id"`
+	Attempt    int      `json:"attempt"`
+	Result     string   `json:"result"`
+	Findings   []string `json:"findings,omitempty"`
+	Risks      []string `json:"risks,omitempty"`
+	Confidence float64  `json:"confidence,omitempty"`
+}
+
+type PeerTurnFailedData struct {
+	PeerTurnID string `json:"peer_turn_id"`
+	Attempt    int    `json:"attempt"`
+	Error      string `json:"error"`
+}
+
+type PeerTurnCancelledData struct {
+	PeerTurnID string `json:"peer_turn_id"`
+	Reason     string `json:"reason"`
 }
 
 type DelegationSpec struct {

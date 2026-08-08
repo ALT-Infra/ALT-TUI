@@ -2,17 +2,17 @@
 
 > **Pre-release software.** ALT is under active verification. Its storage format, command surface, and runtime contracts may still change before the first stable release.
 
-ALT is a local orchestration environment for people who want to choose how several large language models work together. A Team binds exact gateway models to user-written assignments, an explicit Router, Lead eligibility, and permitted call edges. The Router selects the Lead responsible for each request; that Lead coordinates any further work and remains accountable for the final answer.
+ALT is a local orchestration environment for people who want to choose how several large language models work together. A Team binds exact gateway models to user-written assignments, an explicit Router, Router-to-Lead authority, stateless-call edges, and stateful-peer edges. The Router selects the Lead responsible for each request; that Lead coordinates any further work and remains accountable for the final answer.
 
 ALT does not choose a default Team, rewrite assignment definitions, substitute missing models, or maintain a hardcoded universal model catalog. The user defines the organization. ALT enforces the organization that was defined.
 
 ## Execution model
 
-A published Team revision contains one Router and at least two Lead-capable members. Each member has one exact model identity, one verbatim assignment definition, and an explicit place in the call graph. A model may be both Lead-capable and callable by another Lead without being duplicated into several fictional identities.
+A published Team revision contains one Router and at least two Leads. Each member has one exact model identity, one verbatim assignment definition, and one exclusive authority role: coordination Lead or contributor. A Router edge makes a member a Lead; removing that edge revokes the authority. Contributors may be available through stateless-call edges, stateful-peer edges, or both, but never become Leads during those relationships.
 
 Routing assigns ownership; it does not precompute the solution. The selected Lead repeatedly decides whether to act directly, call one or more connected members, wait for active work, cancel obsolete work, or answer. Independent calls may run concurrently. Dependent calls are formed after their prerequisites return, so later work can incorporate earlier evidence instead of following a frozen queue.
 
-A member called by a Lead starts without conversation history or inherited authority. It receives its assignment definition, the bounded objective, the context deliberately prepared for that invocation, and only the runtime tools required for that work. It returns to the Lead and cannot answer the user or become a second Router. Sessions retain durable, labelled orchestration history so later turns can continue the same conversation without silently changing the pinned Team revision.
+A specialist called by a Lead starts without conversation history or inherited authority. It receives its assignment definition, the bounded objective, and the context deliberately prepared for that invocation, then returns once. A peer collaboration instead retains only that relationship's evolving context across turns so the Lead and contributor can iteratively refine the work; its state cannot bleed into another collaboration. Neither relationship can answer the user, take ownership, or become a second Router. Sessions retain durable, labelled orchestration history so later turns can continue the same conversation without silently changing the pinned Team revision.
 
 ## Interfaces
 
@@ -21,9 +21,7 @@ Running `alt` opens the terminal interface. ALT starts without a selected Team a
 | Command | Effect |
 | --- | --- |
 | `/profile` | Select an immutable Team revision. |
-| `/team new` | Open the native Team graph builder. |
-| `/team edit [id[@revision]]` | Open a published Team as a mutable draft. |
-| `/team` | Inspect the active Team in a read-only native graph. |
+| `/team [id[@revision]]` | Open the native Team graph; switch among New Team, Edit Team, and Inspect Team inside the window. |
 | `/thinking` | Toggle the live execution graph for the active conversation. |
 | `/auth` | Configure a gateway or Exa credential. |
 | `/resume` | Search and resume durable conversations. |
@@ -32,25 +30,27 @@ Running `alt` opens the terminal interface. ALT starts without a selected Team a
 | `/copy` | Copy the last answer as Markdown. |
 | `/cancel` | Interrupt active orchestration. |
 
-The builder, inspector, and execution graph are floating native windows launched by the same executable. The builder writes drafts and publishes validated revisions. The Team inspector is read-only. The execution graph consumes the ordered events already stored for recovery; it is a projection of runtime state, not a second orchestration authority.
+The Team surface and execution graph are floating native windows launched by the same executable. One Team window switches among creation, editing, and read-only inspection while preserving the graph as the common object. Authoring publishes validated revisions. The execution graph consumes the ordered events already stored for recovery; it is a projection of runtime state, not a second orchestration authority.
 
 ## Gateways and model identity
 
-ALT integrates with multi-model inference gateways rather than requiring one credential for every model laboratory. The currently registered gateways are OpenCode, ZenMux, Together, and Fireworks. Each adapter owns authenticated catalog discovery, endpoint rules, capability evidence, exact model references, and execution for its service.
+ALT integrates with multi-model inference gateways rather than requiring one credential for every model laboratory. The currently registered gateways are ClinePass, OpenCode, ZenMux, Together, and Fireworks. Each adapter owns authentication, catalog discovery, endpoint rules, capability evidence, exact model references, and execution for its service. ClinePass uses Cline account device authorization and rotating account tokens; ALT implements that public protocol directly and does not depend on the Cline program.
 
-The Team builder displays the models returned for the user's authenticated accounts. A selected catalog identity is preserved through publication and execution. ALT does not strip provider prefixes, guess replacement models, invent capability support, or represent unknown prices as zero.
+The Team builder displays the models returned for one authenticated gateway account. Every model in a Team comes from that gateway, so running the Team requires one gateway credential—not a bundle of provider accounts. Provider neutrality means choosing which supported gateway backs the Team. A selected catalog identity is preserved through publication and execution. ALT does not strip provider prefixes, guess replacement models, invent capability support, or represent unknown prices as zero.
 
 Configure connections interactively with `/auth` or from the command line:
 
 ```sh
 alt auth set opencode
+# ClinePass opens account authorization instead of asking for an API key.
+alt auth set cline
 alt auth status
 alt auth models opencode
 alt auth test opencode
 alt auth set exa
 ```
 
-Gateway authentication tests list the authenticated catalog and do not spend model tokens. The Exa test performs one explicit minimal search because successful search authorization cannot be established from a model catalog.
+Gateway authentication tests list the authenticated catalog and do not spend model tokens. ClinePass first validates the account token against Cline's authenticated models endpoint, then presents the current pass and free catalog without substituting IDs. The Exa test performs one explicit minimal search because successful search authorization cannot be established from a model catalog.
 
 Credentials are stored in the operating system credential service when it is available. ALT otherwise reports that it is using a private `0600` fallback file in its data directory. The data directory is selected from `--data-dir`, `$ALT_HOME`, `$XDG_DATA_HOME/alt-v1`, or `~/.local/share/alt-v1`.
 
@@ -72,7 +72,7 @@ The projection is derived from typed, ordered, durable events. Causal edges come
 
 ## Research basis
 
-ALT's graph engine combines discrete graph structure with continuous geometry. Directed layers, strongly connected components, symmetry classes, crossing order, node dimensions, free boundary ports, obstacle corridors, and stable motion are treated as separate constraints rather than collapsed into one force-directed heuristic. Physical energy models are useful for relaxing geometry after the topology is known; they are not used to infer causality or authority.
+ALT uses a standalone, physics-first constrained-energy engine. Application semantics remain outside it: ALT translates recorded authority into generic directed relationships and geometric constraints, while the engine minimizes hierarchy, stress, repulsion, overlap, crossing, and stability energies over real node rectangles. Exact separation projection, port placement, obstacle routing, and metric evaluation remain distinct stages because no undifferentiated force law can guarantee them. Discrete SCC, symmetry, and crossing methods supply initialization, auxiliary objectives, diagnostics, and measured refinement; they do not infer causality or authority.
 
 The implementation draws on established work rather than visual analogy alone:
 
@@ -84,7 +84,7 @@ The implementation draws on established work rather than visual analogy alone:
 
 Primary sources include [Lamport's distributed-systems ordering paper](https://www.microsoft.com/en-us/research/publication/time-clocks-ordering-events-distributed-system/), [Brandes and Köpf on fast coordinate assignment](https://boriskoepf.de/papers/gd01a.pdf), [stress majorization in graph drawing](https://www.graphviz.org/documentation/GKN04.pdf), [Pip](https://www.usenix.org/conference/nsdi-06/presentation/pip-detecting-unexpected-distributed-systems), [Dapper](https://research.google.com/archive/papers/dapper-2010-1.pdf), the [W3C PROV primer](https://www.w3.org/TR/prov-primer/), [Petri-net theory](https://docenti.ing.unipi.it/~a009435/issw/extra/murata.pdf), and [Graph of Trace](https://aclanthology.org/2026.acl-demo.29/).
 
-ALT maintains a narrow [egui_graph fork](https://github.com/ALT-Systems/egui_graph) for interaction semantics, reflection-symmetric boundary ports, and obstacle-safe routes required by the native canvases. The fork retains upstream history and is consumed at a pinned commit.
+The reusable mathematics lives in [ALT Physics](https://github.com/ALT-Infra/alt-physics). ALT also maintains a narrow [egui_graph fork](https://github.com/ALT-Infra/egui_graph) for interaction semantics required by the native canvases. Both dependencies retain upstream or standalone history and are consumed at pinned commits.
 
 ## Architecture
 

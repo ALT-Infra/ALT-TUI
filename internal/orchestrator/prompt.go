@@ -20,6 +20,10 @@ func routerMessages(
 		for _, member := range p.CallableMembersFor(lead) {
 			fmt.Fprintf(&candidates, "- %s: %s\n", member.ID, p.MemberDefinition(member))
 		}
+		fmt.Fprintln(&candidates, "Stateful peers:")
+		for _, peer := range p.PeerMembersFor(lead) {
+			fmt.Fprintf(&candidates, "- %s: %s\n", peer.ID, p.MemberDefinition(peer))
+		}
 	}
 	system := `Select exactly one of the listed Leads to receive the user's request.
 Base the choice on the result the user actually wants and on which Lead, together
@@ -71,6 +75,16 @@ Return only JSON:
       "required_tools": ["runtime tool names that must actually be called"]
     }
   ],
+  "peer_turns": [
+    {
+      "key": "unique key within this decision",
+      "peer_id": "permitted peer id",
+      "collaboration_id": "existing collaboration id to continue, or empty to begin",
+      "objective": "the next concrete contribution sought from the peer",
+      "context": "new context for this round",
+      "required_tools": ["runtime tool names that must actually be called"]
+    }
+  ],
   "cancel": ["active delegation ids no longer useful"],
   "finalize": false,
   "final_brief": ""
@@ -92,6 +106,14 @@ member definition, the objective and context you author for that call, and the
 runtime tools you explicitly require. A dependency controls scheduling only;
 its result is not transmitted to a later member. If later work needs earlier
 evidence, curate the relevant evidence into that call's context.
+
+Peer work is different. A peer relationship permits iterative collaboration
+with that contributor while this Lead remains solely accountable. Start a new
+collaboration by leaving collaboration_id empty. Continue only a recorded
+collaboration with the same peer; that peer receives the completed rounds from
+that collaboration and no history from unrelated collaborations or sessions.
+Plan at most one new turn for a given collaboration at once, then reconsider
+after its result. A peer cannot route, become the Lead, or answer the user.
 
 The session state is cumulative: user_task is the same original request on
 every Lead turn, not a fresh request. A completed delegation remains completed
@@ -116,6 +138,18 @@ objective.`
 		Risks     []string         `json:"risks,omitempty"`
 		Error     string           `json:"error,omitempty"`
 	}
+	type peerTurnView struct {
+		ID              string           `json:"id"`
+		CollaborationID string           `json:"collaboration_id"`
+		PeerID          string           `json:"peer_id"`
+		Round           int              `json:"round"`
+		Objective       string           `json:"objective"`
+		Status          DelegationStatus `json:"status"`
+		Result          string           `json:"result,omitempty"`
+		Findings        []string         `json:"findings,omitempty"`
+		Risks           []string         `json:"risks,omitempty"`
+		Error           string           `json:"error,omitempty"`
+	}
 	var members []memberView
 	for _, member := range p.CallableMembersFor(lead) {
 		members = append(members, memberView{
@@ -136,18 +170,75 @@ objective.`
 			Error:     delegation.Error,
 		})
 	}
+	var peers []memberView
+	for _, peer := range p.PeerMembersFor(lead) {
+		peers = append(peers, memberView{ID: peer.ID, Definition: p.MemberDefinition(peer)})
+	}
+	var peerTurns []peerTurnView
+	for _, turn := range state.SortedPeerTurns() {
+		peerTurns = append(peerTurns, peerTurnView{
+			ID: turn.Spec.ID, CollaborationID: turn.Spec.CollaborationID,
+			PeerID: turn.Spec.PeerID, Round: turn.Spec.Round,
+			Objective: turn.Spec.Objective, Status: turn.Status,
+			Result: turn.Result, Findings: turn.Findings, Risks: turn.Risks, Error: turn.Error,
+		})
+	}
 	payload := map[string]any{
 		"user_task":               state.Task,
 		"conversation_history":    conversationHistory(state.ConversationHistory),
 		"user_instructions":       state.UserInstructions,
 		"permitted_members":       members,
+		"permitted_peers":         peers,
 		"inherited_runtime_tools": tooling.Supported(),
 		"delegations":             delegations,
+		"peer_turns":              peerTurns,
 		"new_signals":             signals,
 		"lead_turn":               state.LeadTurns + 1,
 	}
 	encoded, _ := json.MarshalIndent(payload, "", "  ")
 	return system, "CURRENT SESSION STATE:\n" + string(encoded)
+}
+
+func peerMessages(p profile.Profile, peer profile.MemberAssignment, turn *PeerTurn, history []*PeerTurn) (string, string) {
+	system := `Contribute to an iterative collaboration with the selected Lead.
+The Lead remains solely accountable for the request and final answer. You may
+challenge, refine, or extend the work, but cannot route, delegate, take over the
+request, or answer the user.
+
+Return only JSON:
+{
+  "result": "concise but complete contribution for this round",
+  "findings": ["material findings"],
+  "risks": ["material risks or uncertainties"],
+  "confidence": 0.0
+}`
+	system += "\n\nThe user defined this contributor in the following words:\n" + p.MemberDefinition(peer)
+	if len(turn.Spec.RequiredTools) > 0 {
+		system += "\n\nRequired tool calls:\n- " + strings.Join(turn.Spec.RequiredTools, "\n- ")
+		system += "\nCall every required tool before returning the result."
+	}
+	type priorRound struct {
+		Round     int      `json:"round"`
+		Objective string   `json:"objective"`
+		Result    string   `json:"result"`
+		Findings  []string `json:"findings,omitempty"`
+		Risks     []string `json:"risks,omitempty"`
+	}
+	var prior []priorRound
+	for _, earlier := range history {
+		if earlier.Spec.ID == turn.Spec.ID || earlier.Status != DelegationCompleted {
+			continue
+		}
+		prior = append(prior, priorRound{Round: earlier.Spec.Round, Objective: earlier.Spec.Objective, Result: earlier.Result, Findings: earlier.Findings, Risks: earlier.Risks})
+	}
+	payload, _ := json.MarshalIndent(map[string]any{
+		"collaboration_id": turn.Spec.CollaborationID,
+		"prior_rounds":     prior,
+		"current_round":    turn.Spec.Round,
+		"objective":        turn.Spec.Objective,
+		"context":          turn.Spec.Context,
+	}, "", "  ")
+	return system, string(payload)
 }
 
 func memberMessages(
@@ -209,6 +300,15 @@ The user defined the responsible Lead assignment in the following words:
 				Result:    delegation.Result,
 				Findings:  delegation.Findings,
 				Risks:     delegation.Risks,
+			})
+		}
+	}
+	for _, turn := range state.SortedPeerTurns() {
+		if turn.Status == DelegationCompleted {
+			results = append(results, resultView{
+				Member:    turn.Spec.PeerID,
+				Objective: fmt.Sprintf("peer collaboration %s round %d: %s", turn.Spec.CollaborationID, turn.Spec.Round, turn.Spec.Objective),
+				Result:    turn.Result, Findings: turn.Findings, Risks: turn.Risks,
 			})
 		}
 	}

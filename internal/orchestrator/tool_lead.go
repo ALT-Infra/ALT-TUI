@@ -40,7 +40,7 @@ the required JSON decision. If you call any runtime tool, finish that tool-work
 phase with a concise factual completion report instead; ALT will pass that
 report to a fresh, tool-free structured transition call. Do not mix a
 user-facing answer with a coordination decision.`
-		capabilities := r.providers.Capabilities(r.profile.Models[lead.Model])
+		capabilities := r.providers.Capabilities(r.profile.Gateway, r.profile.Models[lead.Model])
 		if capabilities.ToolCalling == provider.CapabilityUnsupported {
 			instruction += "\nThe authenticated gateway catalog explicitly marks this model as tool-call unsupported. Coordinate using the supplied durable state and delegated members; do not claim to inspect the workspace directly."
 		} else {

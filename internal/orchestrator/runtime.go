@@ -231,6 +231,12 @@ func sharedConversationEvent(kind event.Kind) bool {
 		event.DelegationCompleted,
 		event.DelegationFailed,
 		event.DelegationCancelled,
+		event.PeerTurnCreated,
+		event.PeerTurnStarted,
+		event.PeerReasoning,
+		event.PeerTurnCompleted,
+		event.PeerTurnFailed,
+		event.PeerTurnCancelled,
 		event.ToolCalled,
 		event.ToolCompleted,
 		event.FinalReasoning,
@@ -350,7 +356,7 @@ func (r *sessionRuntime) decideLead(ctx context.Context, signals []Signal) (Lead
 		if strings.TrimSpace(decision.Assessment) == "" {
 			return fmt.Errorf("assessment is empty")
 		}
-		if !decision.Finalize && len(decision.Delegations) == 0 && state.WorkCount() == 0 {
+		if !decision.Finalize && len(decision.Delegations) == 0 && len(decision.PeerTurns) == 0 && state.WorkCount() == 0 {
 			return fmt.Errorf("no delegation or final answer was produced while no work was active")
 		}
 		if decision.Finalize && strings.TrimSpace(decision.FinalBrief) == "" {
@@ -373,7 +379,7 @@ func (r *sessionRuntime) applyDecision(ctx context.Context, decision LeadDecisio
 	lead, _ := r.profile.Lead(state.LeadID)
 
 	for _, id := range uniqueStrings(decision.Cancel) {
-		if err := r.cancelDelegation(ctx, id, "cancelled by Lead coordination decision"); err != nil {
+		if err := r.cancelWork(ctx, id, "cancelled by Lead coordination decision"); err != nil {
 			return false, err
 		}
 	}
@@ -382,7 +388,11 @@ func (r *sessionRuntime) applyDecision(ctx context.Context, decision LeadDecisio
 	if err != nil {
 		return false, err
 	}
-	if !decision.Finalize && len(specs) == 0 && decision.observedWork == 0 {
+	peerSpecs, err := r.materializePeerTurns(state, lead, decision.PeerTurns)
+	if err != nil {
+		return false, err
+	}
+	if !decision.Finalize && len(specs) == 0 && len(peerSpecs) == 0 && decision.observedWork == 0 {
 		current, err := r.projection(ctx)
 		if err != nil {
 			return false, err
@@ -400,6 +410,7 @@ func (r *sessionRuntime) applyDecision(ctx context.Context, decision LeadDecisio
 			Turn:          state.LeadTurns,
 			Assessment:    decision.Assessment,
 			Delegations:   specs,
+			PeerTurns:     peerSpecs,
 			Cancellations: uniqueStrings(decision.Cancel),
 			WillFinalize:  decision.Finalize,
 		},
@@ -410,6 +421,14 @@ func (r *sessionRuntime) applyDecision(ctx context.Context, decision LeadDecisio
 	for _, spec := range specs {
 		if _, err := r.store.Append(ctx, r.session.ID, event.Draft{
 			Kind: event.DelegationCreated, Actor: lead.ID,
+			CorrelationID: spec.ID, Data: spec,
+		}); err != nil {
+			return false, err
+		}
+	}
+	for _, spec := range peerSpecs {
+		if _, err := r.store.Append(ctx, r.session.ID, event.Draft{
+			Kind: event.PeerTurnCreated, Actor: lead.ID,
 			CorrelationID: spec.ID, Data: spec,
 		}); err != nil {
 			return false, err
@@ -433,6 +452,89 @@ func (r *sessionRuntime) applyDecision(ctx context.Context, decision LeadDecisio
 		return false, err
 	}
 	return false, nil
+}
+
+func (r *sessionRuntime) materializePeerTurns(
+	state *Projection,
+	lead profile.LeadAssignment,
+	proposals []ProposedPeerTurn,
+) ([]event.PeerTurnSpec, error) {
+	type collaboration struct {
+		peerID string
+		round  int
+		active bool
+	}
+	known := make(map[string]collaboration)
+	for _, turn := range state.SortedPeerTurns() {
+		current := known[turn.Spec.CollaborationID]
+		if current.peerID == "" {
+			current.peerID = turn.Spec.PeerID
+		}
+		if turn.Spec.Round > current.round {
+			current.round = turn.Spec.Round
+		}
+		current.active = current.active || turn.Status == DelegationPending || turn.Status == DelegationRunning
+		known[turn.Spec.CollaborationID] = current
+	}
+	keys := make(map[string]bool)
+	usedCollaborations := make(map[string]bool)
+	var result []event.PeerTurnSpec
+	for index, proposal := range proposals {
+		key := strings.TrimSpace(proposal.Key)
+		if key == "" {
+			return nil, fmt.Errorf("peer turn %d requires a key", index)
+		}
+		if keys[key] {
+			return nil, fmt.Errorf("peer turn key %q is duplicated", key)
+		}
+		keys[key] = true
+		peer, ok := r.profile.PeerMemberFor(lead, proposal.PeerID)
+		if !ok {
+			return nil, fmt.Errorf("Lead %s has no peer relationship with %s", lead.ID, proposal.PeerID)
+		}
+		if strings.TrimSpace(proposal.Objective) == "" {
+			return nil, fmt.Errorf("peer turn %s has an empty objective", key)
+		}
+		collaborationID := strings.TrimSpace(proposal.CollaborationID)
+		if collaborationID == "" {
+			id, err := uuid.NewV7()
+			if err != nil {
+				return nil, fmt.Errorf("create collaboration id: %w", err)
+			}
+			collaborationID = id.String()
+		}
+		current, exists := known[collaborationID]
+		if exists && current.peerID != peer.ID {
+			return nil, fmt.Errorf("collaboration %s belongs to peer %s, not %s", collaborationID, current.peerID, peer.ID)
+		}
+		if current.active || usedCollaborations[collaborationID] {
+			return nil, fmt.Errorf("collaboration %s already has an active or newly planned turn; wait for it before continuing", collaborationID)
+		}
+		requiredTools := uniqueStrings(proposal.RequiredTools)
+		permitted := make(map[string]bool)
+		for _, name := range tooling.Supported() {
+			permitted[name] = true
+		}
+		for _, name := range requiredTools {
+			if !permitted[name] {
+				return nil, fmt.Errorf("peer turn %s requires unknown runtime tool %s", key, name)
+			}
+		}
+		id, err := uuid.NewV7()
+		if err != nil {
+			return nil, fmt.Errorf("create peer turn id: %w", err)
+		}
+		spec := event.PeerTurnSpec{
+			ID: id.String(), Key: key, CollaborationID: collaborationID,
+			PeerID: peer.ID, Objective: strings.TrimSpace(proposal.Objective),
+			Context: strings.TrimSpace(proposal.Context), RequiredTools: requiredTools,
+			Round: current.round + 1,
+		}
+		usedCollaborations[collaborationID] = true
+		known[collaborationID] = collaboration{peerID: peer.ID, round: spec.Round, active: true}
+		result = append(result, spec)
+	}
+	return result, nil
 }
 
 func (r *sessionRuntime) materializeDelegations(
@@ -538,6 +640,24 @@ func (r *sessionRuntime) scheduleReady(ctx context.Context) error {
 		r.launched[key] = struct{}{}
 		r.mu.Unlock()
 		go r.executeDelegation(ctx, delegation.Spec.ID, attempt)
+	}
+	for _, turn := range state.SortedPeerTurns() {
+		if turn.Status == DelegationCompleted || turn.Status == DelegationCancelled || turn.Status == DelegationRunning {
+			continue
+		}
+		if turn.Status == DelegationFailed && !turn.Interrupted {
+			continue
+		}
+		attempt := turn.Attempt + 1
+		key := fmt.Sprintf("peer:%s:%d", turn.Spec.ID, attempt)
+		r.mu.Lock()
+		if _, exists := r.launched[key]; exists {
+			r.mu.Unlock()
+			continue
+		}
+		r.launched[key] = struct{}{}
+		r.mu.Unlock()
+		go r.executePeerTurn(ctx, turn.Spec.ID, attempt)
 	}
 	return nil
 }
@@ -799,6 +919,47 @@ func (r *sessionRuntime) markInterruptedDelegations(ctx context.Context) error {
 			return err
 		}
 	}
+	for _, turn := range state.SortedPeerTurns() {
+		if turn.Status != DelegationRunning {
+			continue
+		}
+		if _, err := r.store.Append(ctx, r.session.ID, event.Draft{
+			Kind: event.PeerTurnFailed, Actor: "recovery", CorrelationID: turn.Spec.ID,
+			Data: event.PeerTurnFailedData{PeerTurnID: turn.Spec.ID, Attempt: turn.Attempt, Error: "execution interrupted before a durable terminal event"},
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *sessionRuntime) cancelWork(ctx context.Context, id, reason string) error {
+	state, err := r.projection(ctx)
+	if err != nil {
+		return err
+	}
+	if state.Delegations[id] != nil {
+		return r.cancelDelegation(ctx, id, reason)
+	}
+	turn := state.PeerTurns[id]
+	if turn == nil {
+		return fmt.Errorf("cannot cancel unknown work %s", id)
+	}
+	if turn.Status == DelegationCompleted || turn.Status == DelegationCancelled {
+		return nil
+	}
+	if _, err := r.store.Append(ctx, r.session.ID, event.Draft{
+		Kind: event.PeerTurnCancelled, Actor: state.LeadID, CorrelationID: id,
+		Data: event.PeerTurnCancelledData{PeerTurnID: id, Reason: reason},
+	}); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	cancel := r.active[id]
+	r.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	return nil
 }
 
@@ -838,6 +999,11 @@ func (r *sessionRuntime) cancelActiveDelegations(ctx context.Context, reason str
 	for _, delegation := range state.SortedDelegations() {
 		if delegation.Status == DelegationPending || delegation.Status == DelegationRunning {
 			_ = r.cancelDelegation(ctx, delegation.Spec.ID, reason)
+		}
+	}
+	for _, turn := range state.SortedPeerTurns() {
+		if turn.Status == DelegationPending || turn.Status == DelegationRunning {
+			_ = r.cancelWork(ctx, turn.Spec.ID, reason)
 		}
 	}
 }

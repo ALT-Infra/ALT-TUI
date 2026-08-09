@@ -44,7 +44,7 @@ user-facing answer with a coordination decision.`
 		if capabilities.ToolCalling == provider.CapabilityUnsupported {
 			instruction += "\nThe authenticated gateway catalog explicitly marks this model as tool-call unsupported. Coordinate using the supplied durable state and delegated members; do not claim to inspect the workspace directly."
 		} else {
-			runtimeHandlers, err := r.tools.Handlers(ctx, "lead:"+lead.ID, nil)
+			runtimeHandlers, err := r.tools.Handlers(ctx, "lead:"+lead.ID)
 			if err != nil {
 				return LeadDecision{}, err
 			}
@@ -102,6 +102,7 @@ user-facing answer with a coordination decision.`
 						Kind: event.ToolCalled, Actor: lead.ID,
 						Data: event.ToolCallData{
 							ToolCallID: call.ID, Tool: call.Function.Name,
+							Provider:  r.tools.ProviderForTool(ctx, call.Function.Name),
 							Arguments: call.Function.Arguments,
 						},
 					}); err != nil {

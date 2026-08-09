@@ -207,6 +207,10 @@ struct RuntimeCapabilities {
     filesystem_confinement: bool,
     direct_terminal_network: bool,
     exa_configured: bool,
+    #[serde(default)]
+    linkup_configured: bool,
+    #[serde(default)]
+    research_provider: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -2629,7 +2633,9 @@ impl ThinkingApp {
                                     ui.horizontal(|ui| {
                                         ui.colored_label(status_color(&node.status), "●");
                                         ui.label(
-                                            egui::RichText::new(&node.label).strong().color(accent),
+                                            egui::RichText::new(thinking_node_label(node))
+                                                .strong()
+                                                .color(accent),
                                         );
                                     });
                                     ui.label(
@@ -2775,7 +2781,7 @@ impl ThinkingApp {
         let Some(node) = self.state.active.nodes.get(id).cloned() else {
             return;
         };
-        ui.heading(&node.label);
+        ui.heading(thinking_node_label(&node));
         ui.monospace(&node.id);
         ui.horizontal(|ui| {
             ui.colored_label(status_color(&node.status), "●");
@@ -2932,7 +2938,7 @@ impl ThinkingApp {
             .active
             .nodes
             .values()
-            .filter(|node| node.kind == "tool")
+            .filter(|node| is_thinking_tool_node(node))
             .collect();
         if !tools.is_empty() {
             let bottom = positions
@@ -2990,7 +2996,7 @@ fn runtime_policy_badge(ui: &mut egui::Ui, runtime: &RuntimeCapabilities) {
             "SANDBOXED · NETWORK ISOLATED",
         )
         .on_hover_text(
-            "Bubblewrap namespaces, no_new_privs, and Landlock confine terminal commands. Web research uses the separate Exa connection.",
+            "Bubblewrap namespaces, no_new_privs, and Landlock confine terminal commands. Web research uses the separately selected research connection.",
         );
     }
 }
@@ -3015,12 +3021,18 @@ fn runtime_capabilities(ui: &mut egui::Ui, runtime: &RuntimeCapabilities) {
         });
     });
     ui.horizontal_wrapped(|ui| {
-        ui.strong("Exa web research");
-        if runtime.exa_configured {
-            ui.colored_label(egui::Color32::from_rgb(82, 211, 158), "configured");
+        ui.strong("Web research");
+        if !runtime.research_provider.is_empty() {
+            ui.colored_label(
+                egui::Color32::from_rgb(82, 211, 158),
+                format!("{} selected", runtime.research_provider),
+            );
+        } else if runtime.exa_configured || runtime.linkup_configured {
+            ui.colored_label(egui::Color32::from_rgb(236, 190, 74), "selection required")
+                .on_hover_text("Choose Exa or Linkup with /research.");
         } else {
             ui.colored_label(egui::Color32::from_rgb(236, 190, 74), "credential required")
-                .on_hover_text("Run `alt auth set exa`.");
+                .on_hover_text("Run `alt auth set exa` or `alt auth set linkup`.");
         }
     });
 }
@@ -3170,8 +3182,39 @@ fn thinking_node_fallback_size(node: &ThinkingNode) -> egui::Vec2 {
     match node.kind.as_str() {
         "member" => egui::vec2(210.0, 82.0),
         "tool" => egui::vec2(190.0, 76.0),
+        "tool-discovery" => egui::vec2(150.0, 64.0),
         _ => egui::vec2(180.0, 72.0),
     }
+}
+
+fn is_thinking_tool_node(node: &ThinkingNode) -> bool {
+    matches!(node.kind.as_str(), "tool" | "tool-discovery")
+}
+
+fn thinking_node_label(node: &ThinkingNode) -> String {
+    if node.kind == "tool-discovery" {
+        return "tool discovery".to_owned();
+    }
+    if node.kind != "tool"
+        || !matches!(
+            node.label.as_str(),
+            "web_search" | "web_fetch" | "web_answer"
+        )
+    {
+        return node.label.clone();
+    }
+    let provider = node
+        .metadata
+        .get("provider")
+        .map(String::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_default();
+    let provider = match provider.trim().to_ascii_lowercase().as_str() {
+        "exa" => "Exa",
+        "linkup" => "Linkup",
+        _ => return node.label.clone(),
+    };
+    format!("{} · {provider}", node.label)
 }
 
 fn thinking_routes(
@@ -3225,6 +3268,7 @@ fn thinking_node_role(node: &ThinkingNode) -> &'static str {
         "router" => "ROUTER",
         "user" => "USER",
         "tool" => "TOOL",
+        "tool-discovery" => "DISCOVERY",
         "member"
             if node
                 .metadata
@@ -3245,6 +3289,7 @@ fn thinking_node_accent(node: &ThinkingNode) -> egui::Color32 {
         "CONTRIBUTOR" => egui::Color32::from_rgb(82, 211, 158),
         "USER" => egui::Color32::from_rgb(239, 143, 100),
         "TOOL" => egui::Color32::from_rgb(158, 166, 178),
+        "DISCOVERY" => egui::Color32::from_rgb(116, 137, 159),
         _ => egui::Color32::from_rgb(126, 144, 164),
     }
 }
@@ -3256,6 +3301,7 @@ fn thinking_edge_color(kind: &str) -> egui::Color32 {
         "delegation" | "route" | "request" => egui::Color32::from_rgb(76, 185, 224),
         "peer" | "peer-result" => egui::Color32::from_rgb(236, 190, 74),
         "tool" => egui::Color32::from_rgb(152, 162, 175),
+        "tool-discovery" => egui::Color32::from_rgb(116, 137, 159),
         "allowed" => egui::Color32::from_rgb(54, 61, 69),
         _ => egui::Color32::from_rgb(116, 137, 159),
     }
@@ -3527,10 +3573,11 @@ mod tests {
         metadata_height_budget, pixel_perfect_scene_zoom_range, point_along_polyline,
         rect_ray_anchor, reflow_definition_for_display, rounded_obstacle_safe_route,
         route_between_rects, sample_polyline, segment_rect_entry, tangent_annotation,
-        thinking_fingerprint, thinking_node_id, thinking_routes, thinking_routing_fingerprint,
-        CallEdge, DraftAssignment, DraftMember, LiveRegistration, ModelChoice, PeerEdge, PortEdge,
-        RuntimeCapabilities, Selection, TeamApp, TeamDraft, TeamView, ThinkingApp, ThinkingEdge,
-        ThinkingNode, ThinkingProjection, ThinkingTurn, ThinkingTurnSummary,
+        thinking_fingerprint, thinking_node_id, thinking_node_label, thinking_routes,
+        thinking_routing_fingerprint, CallEdge, DraftAssignment, DraftMember, LiveRegistration,
+        ModelChoice, PeerEdge, PortEdge, RuntimeCapabilities, Selection, TeamApp, TeamDraft,
+        TeamView, ThinkingApp, ThinkingEdge, ThinkingNode, ThinkingProjection, ThinkingTurn,
+        ThinkingTurnSummary,
     };
     use egui_graph::NodeId;
     use std::collections::{BTreeMap, HashMap};
@@ -3548,6 +3595,25 @@ mod tests {
             }
             _ => {}
         }
+    }
+
+    #[test]
+    fn research_tool_labels_use_only_durable_provider_metadata() {
+        let mut node = ThinkingNode {
+            id: "tool:search".to_owned(),
+            kind: "tool".to_owned(),
+            label: "web_search".to_owned(),
+            status: "running".to_owned(),
+            actor: String::new(),
+            metadata: BTreeMap::new(),
+        };
+        assert_eq!(thinking_node_label(&node), "web_search");
+        node.metadata
+            .insert("provider".to_owned(), "Linkup".to_owned());
+        assert_eq!(thinking_node_label(&node), "web_search · Linkup");
+        node.kind = "tool-discovery".to_owned();
+        node.label = "tool_search".to_owned();
+        assert_eq!(thinking_node_label(&node), "tool discovery");
     }
 
     fn dense_peer_draft() -> TeamDraft {

@@ -23,13 +23,11 @@ func (r *sessionRuntime) runToolMember(
 	attempt int,
 ) (string, error) {
 	capabilities := r.providers.Capabilities(r.profile.Gateway, r.profile.Models[member.Model])
-	if len(delegation.Spec.RequiredTools) > 0 &&
-		capabilities.ToolCalling == provider.CapabilityUnsupported {
+	if capabilities.ToolCalling == provider.CapabilityUnsupported {
 		return "", fmt.Errorf(
-			"authenticated gateway catalog marks member %s model %s as tool-call unsupported; required tools: %s",
+			"authenticated gateway catalog marks member %s model %s as tool-call unsupported; ALT assignments require dynamic runtime tools",
 			member.ID,
 			r.profile.Models[member.Model].Name,
-			strings.Join(delegation.Spec.RequiredTools, ", "),
 		)
 	}
 	chat, modelSpec, err := r.providers.Model(ctx, r.profile, member.Model, provider.Text)
@@ -41,11 +39,7 @@ func (r *sessionRuntime) runToolMember(
 		"member:"+member.ID,
 		delegation.Spec.ID,
 	)(chat)
-	runtimeHandlers, err := r.tools.Handlers(
-		ctx,
-		"member:"+member.ID+":"+delegation.Spec.ID,
-		delegation.Spec.RequiredTools,
-	)
+	runtimeHandlers, err := r.tools.Handlers(ctx, "member:"+member.ID+":"+delegation.Spec.ID)
 	if err != nil {
 		return "", err
 	}
@@ -71,7 +65,6 @@ func (r *sessionRuntime) runToolMember(
 	)
 
 	var finalCandidate string
-	usedTools := make(map[string]struct{})
 	for {
 		item, ok := iterator.Next()
 		if !ok {
@@ -100,7 +93,6 @@ func (r *sessionRuntime) runToolMember(
 		switch variant.Role {
 		case schema.Assistant:
 			for _, call := range message.ToolCalls {
-				usedTools[call.Function.Name] = struct{}{}
 				if _, err := r.store.Append(ctx, r.session.ID, event.Draft{
 					Kind: event.ToolCalled, Actor: member.ID,
 					CorrelationID: delegation.Spec.ID,
@@ -108,6 +100,7 @@ func (r *sessionRuntime) runToolMember(
 						DelegationID: delegation.Spec.ID,
 						ToolCallID:   call.ID,
 						Tool:         call.Function.Name,
+						Provider:     r.tools.ProviderForTool(ctx, call.Function.Name),
 						Arguments:    call.Function.Arguments,
 					},
 				}); err != nil {
@@ -145,11 +138,6 @@ func (r *sessionRuntime) runToolMember(
 			}); err != nil {
 				return "", err
 			}
-		}
-	}
-	for _, name := range delegation.Spec.RequiredTools {
-		if _, used := usedTools[name]; !used {
-			return "", fmt.Errorf("member returned without calling required tool %s", name)
 		}
 	}
 	return finalCandidate, nil

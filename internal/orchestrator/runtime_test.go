@@ -590,7 +590,7 @@ func (m *toolScenarioModel) Stream(
 				state := parseLeadState(message.Content)
 				decision := `{"assessment":"The requested workspace evidence is available.","delegations":[],"cancel":[],"finalize":true,"final_brief":"Report the verified evidence."}`
 				if len(state.Delegations) == 0 {
-					decision = `{"assessment":"Have the reader inspect the evidence.","delegations":[{"key":"read","member_id":"reader","objective":"Read evidence.txt and report its content.","context":"","depends_on":[],"required_tools":["read_file"]}],"cancel":[],"finalize":false,"final_brief":""}`
+					decision = `{"assessment":"Have the reader inspect the evidence.","delegations":[{"key":"read","member_id":"reader","objective":"Read evidence.txt and report its content.","context":"","depends_on":[]}],"cancel":[],"finalize":false,"final_brief":""}`
 				}
 				return schema.StreamReaderFromArray([]*schema.Message{response(decision)}), nil
 			}
@@ -654,10 +654,10 @@ func (m *peerScenarioModel) Generate(_ context.Context, input []*schema.Message,
 	case "lead":
 		state := parseLeadState(input[len(input)-1].Content)
 		if len(state.PeerTurns) == 0 {
-			return response(`{"assessment":"Begin a focused collaboration.","delegations":[],"peer_turns":[{"key":"research-1","peer_id":"research","collaboration_id":"","objective":"Establish the recovery invariant.","context":"","required_tools":[]}],"cancel":[],"finalize":false,"final_brief":""}`), nil
+			return response(`{"assessment":"Begin a focused collaboration.","delegations":[],"peer_turns":[{"key":"research-1","peer_id":"research","collaboration_id":"","objective":"Establish the recovery invariant.","context":""}],"cancel":[],"finalize":false,"final_brief":""}`), nil
 		}
 		if len(state.PeerTurns) == 1 && state.PeerTurns[0].Status == string(DelegationCompleted) {
-			return response(`{"assessment":"Refine the first finding in the same collaboration.","delegations":[],"peer_turns":[{"key":"research-2","peer_id":"research","collaboration_id":"` + state.PeerTurns[0].CollaborationID + `","objective":"Stress-test the invariant using the first-round result.","context":"Focus on crash boundaries.","required_tools":[]}],"cancel":[],"finalize":false,"final_brief":""}`), nil
+			return response(`{"assessment":"Refine the first finding in the same collaboration.","delegations":[],"peer_turns":[{"key":"research-2","peer_id":"research","collaboration_id":"` + state.PeerTurns[0].CollaborationID + `","objective":"Stress-test the invariant using the first-round result.","context":"Focus on crash boundaries."}],"cancel":[],"finalize":false,"final_brief":""}`), nil
 		}
 		if len(state.PeerTurns) == 2 && state.PeerTurns[1].Status == string(DelegationCompleted) {
 			return response(`{"assessment":"The iterative peer work is sufficient.","delegations":[],"peer_turns":[],"cancel":[],"finalize":true,"final_brief":"Synthesize both rounds."}`), nil

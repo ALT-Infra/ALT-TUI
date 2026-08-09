@@ -18,6 +18,7 @@ var commandDefinitions = []commandDefinition{
 	{command: "/profile", description: "choose a Team Profile"},
 	{command: "/team", description: "create, edit, or inspect a Team in one graph window"},
 	{command: "/auth", description: "configure a gateway credential securely"},
+	{command: "/research", description: "choose the web research provider"},
 	{command: "/resume", description: "resume a saved conversation"},
 	{command: "/rename", description: "rename the active session", needsInput: true},
 	{command: "/copy", description: "copy the last answer as Markdown"},

@@ -66,7 +66,9 @@ func (r *sessionRuntime) execute(parent context.Context, recovered bool) error {
 		tooling.RuntimeOptions{
 			DangerouslyBypassApprovalsAndSandbox: r.engineOptions.DangerouslyBypassApprovalsAndSandbox,
 			SensitiveEnvironment:                 r.engineOptions.SensitiveEnvironment,
+			ResolveResearchProvider:              r.engineOptions.ResolveResearchProvider,
 			ResolveExaCredential:                 r.engineOptions.ResolveExaCredential,
+			ResolveLinkupCredential:              r.engineOptions.ResolveLinkupCredential,
 		},
 	)
 	if err != nil {
@@ -510,16 +512,6 @@ func (r *sessionRuntime) materializePeerTurns(
 		if current.active || usedCollaborations[collaborationID] {
 			return nil, fmt.Errorf("collaboration %s already has an active or newly planned turn; wait for it before continuing", collaborationID)
 		}
-		requiredTools := uniqueStrings(proposal.RequiredTools)
-		permitted := make(map[string]bool)
-		for _, name := range tooling.Supported() {
-			permitted[name] = true
-		}
-		for _, name := range requiredTools {
-			if !permitted[name] {
-				return nil, fmt.Errorf("peer turn %s requires unknown runtime tool %s", key, name)
-			}
-		}
 		id, err := uuid.NewV7()
 		if err != nil {
 			return nil, fmt.Errorf("create peer turn id: %w", err)
@@ -527,8 +519,8 @@ func (r *sessionRuntime) materializePeerTurns(
 		spec := event.PeerTurnSpec{
 			ID: id.String(), Key: key, CollaborationID: collaborationID,
 			PeerID: peer.ID, Objective: strings.TrimSpace(proposal.Objective),
-			Context: strings.TrimSpace(proposal.Context), RequiredTools: requiredTools,
-			Round: current.round + 1,
+			Context: strings.TrimSpace(proposal.Context),
+			Round:   current.round + 1,
 		}
 		usedCollaborations[collaborationID] = true
 		known[collaborationID] = collaboration{peerID: peer.ID, round: spec.Round, active: true}
@@ -555,25 +547,12 @@ func (r *sessionRuntime) materializeDelegations(
 		if _, exists := keys[proposal.Key]; exists {
 			return nil, fmt.Errorf("delegation key %q is duplicated", proposal.Key)
 		}
-		member, ok := r.profile.CallableMemberFor(lead, proposal.MemberID)
+		_, ok := r.profile.CallableMemberFor(lead, proposal.MemberID)
 		if !ok {
 			return nil, fmt.Errorf("Lead %s cannot access member %s", lead.ID, proposal.MemberID)
 		}
 		if strings.TrimSpace(proposal.Objective) == "" {
 			return nil, fmt.Errorf("delegation %s has an empty objective", proposal.Key)
-		}
-		requiredTools := uniqueStrings(proposal.RequiredTools)
-		permittedTools := make(map[string]struct{}, len(tooling.Supported()))
-		for _, name := range tooling.Supported() {
-			permittedTools[name] = struct{}{}
-		}
-		for _, name := range requiredTools {
-			if _, permitted := permittedTools[name]; !permitted {
-				return nil, fmt.Errorf(
-					"delegation %s requires unknown runtime tool %s for member %s",
-					proposal.Key, name, member.ID,
-				)
-			}
 		}
 		id, err := uuid.NewV7()
 		if err != nil {
@@ -596,14 +575,13 @@ func (r *sessionRuntime) materializeDelegations(
 			}
 		}
 		spec := event.DelegationSpec{
-			ID:            id.String(),
-			Key:           proposal.Key,
-			MemberID:      proposal.MemberID,
-			Objective:     strings.TrimSpace(proposal.Objective),
-			Context:       strings.TrimSpace(proposal.Context),
-			DependsOn:     dependencies,
-			RequiredTools: requiredTools,
-			Depth:         depth,
+			ID:        id.String(),
+			Key:       proposal.Key,
+			MemberID:  proposal.MemberID,
+			Objective: strings.TrimSpace(proposal.Objective),
+			Context:   strings.TrimSpace(proposal.Context),
+			DependsOn: dependencies,
+			Depth:     depth,
 		}
 		keys[proposal.Key] = spec.ID
 		known[spec.ID] = spec
@@ -787,7 +765,7 @@ func (r *sessionRuntime) generateFinal(ctx context.Context, lead profile.LeadAss
 	}
 	chat = r.observeModel(lead.Model, "final:"+lead.ID)(chat)
 	system, user := finalMessages(r.profile, lead, state, brief)
-	handlers, err := r.tools.Handlers(ctx, "final:"+lead.ID, nil)
+	handlers, err := r.tools.Handlers(ctx, "final:"+lead.ID)
 	if err != nil {
 		return err
 	}
@@ -843,6 +821,7 @@ func (r *sessionRuntime) generateFinal(ctx context.Context, lead profile.LeadAss
 					Kind: event.ToolCalled, Actor: lead.ID,
 					Data: event.ToolCallData{
 						ToolCallID: call.ID, Tool: call.Function.Name,
+						Provider:  r.tools.ProviderForTool(ctx, call.Function.Name),
 						Arguments: call.Function.Arguments,
 					},
 				}); err != nil {

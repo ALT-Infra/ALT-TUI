@@ -1,6 +1,7 @@
 package thinking
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -432,12 +433,19 @@ func (t *Turn) apply(item event.Event) error {
 		}
 		owner := t.ownerFor(data.DelegationID)
 		toolID := "tool:" + data.ToolCallID
+		kind := "tool"
+		if data.Tool == "tool_search" {
+			kind = "tool-discovery"
+		}
 		t.Nodes[toolID] = &Node{
-			ID: toolID, Kind: "tool", Label: data.Tool, Status: Running,
+			ID: toolID, Kind: kind, Label: data.Tool, Status: Running,
 			Metadata: map[string]string{"arguments": data.Arguments},
 		}
+		if provider := displayResearchProvider(data.Provider); provider != "" {
+			setMetadata(t.Nodes[toolID], "provider", provider)
+		}
 		t.toolOwners[data.ToolCallID] = owner
-		t.flow("tool:"+data.ToolCallID, owner, toolID, "tool", "outward", Running, item.At, 1)
+		t.flow("tool:"+data.ToolCallID, owner, toolID, kind, "outward", Running, item.At, 1)
 	case event.ToolCompleted:
 		data, err := event.Decode[event.ToolCompletedData](item)
 		if err != nil {
@@ -453,6 +461,9 @@ func (t *Turn) apply(item event.Event) error {
 			node.Status = status
 			setMetadata(node, "error", data.Error)
 			setMetadata(node, "result", data.Result)
+			if provider := researchProviderFromToolResult(data.Result); provider != "" {
+				setMetadata(node, "provider", provider)
+			}
 		}
 		if edge := t.Edges["flow:tool:"+data.ToolCallID]; edge != nil {
 			edge.Status = status
@@ -518,6 +529,27 @@ func (t *Turn) apply(item event.Event) error {
 	t.Sequence = item.Sequence
 	t.UpdatedAt = item.At
 	return nil
+}
+
+func researchProviderFromToolResult(result string) string {
+	var envelope struct {
+		Provider string `json:"provider"`
+	}
+	if json.Unmarshal([]byte(result), &envelope) != nil {
+		return ""
+	}
+	return displayResearchProvider(envelope.Provider)
+}
+
+func displayResearchProvider(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "exa":
+		return "Exa"
+	case "linkup":
+		return "Linkup"
+	default:
+		return ""
+	}
 }
 
 func (t *Turn) terminate(status Status) {

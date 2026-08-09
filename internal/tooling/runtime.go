@@ -32,7 +32,9 @@ type Runtime struct {
 type RuntimeOptions struct {
 	DangerouslyBypassApprovalsAndSandbox bool
 	SensitiveEnvironment                 []string
+	ResolveResearchProvider              func(context.Context) (string, error)
 	ResolveExaCredential                 func() (string, error)
+	ResolveLinkupCredential              func() (string, error)
 }
 
 func NewRuntime(parent context.Context, workspace string) (*Runtime, error) {

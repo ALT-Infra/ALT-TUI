@@ -62,6 +62,8 @@ type RuntimeCapabilities struct {
 	FilesystemConfinement                bool     `json:"filesystem_confinement"`
 	DirectTerminalNetwork                bool     `json:"direct_terminal_network"`
 	ExaConfigured                        bool     `json:"exa_configured"`
+	LinkupConfigured                     bool     `json:"linkup_configured"`
+	ResearchProvider                     string   `json:"research_provider,omitempty"`
 	Tools                                []string `json:"tools"`
 }
 

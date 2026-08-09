@@ -55,7 +55,7 @@ func TestConversationHistoryReachesRouterLeadAndFinalPrompts(t *testing.T) {
 	}
 }
 
-func TestCalledMemberReceivesOnlyDefinitionObjectiveContextAndGrantedTools(t *testing.T) {
+func TestCalledMemberReceivesOnlyDefinitionObjectiveContextAndToolDiscoveryPolicy(t *testing.T) {
 	document, err := profile.Parse(builtinprofiles.Engineering)
 	if err != nil {
 		t.Fatal(err)
@@ -65,16 +65,15 @@ func TestCalledMemberReceivesOnlyDefinitionObjectiveContextAndGrantedTools(t *te
 	member := p.CallableMembersFor(lead)[0]
 	delegation := &Delegation{Spec: event.DelegationSpec{
 		ID: "d2", MemberID: member.ID,
-		Objective:     "Check the bounded endpoint behavior.",
-		Context:       "The Lead explicitly curated this evidence.",
-		DependsOn:     []string{"secret-dependency-id"},
-		RequiredTools: []string{"read_file"},
+		Objective: "Check the bounded endpoint behavior.",
+		Context:   "The Lead explicitly curated this evidence.",
+		DependsOn: []string{"secret-dependency-id"},
 	}}
 	system, user := memberMessages(p, member, delegation)
 
 	if !strings.Contains(system, member.Definition) ||
-		!strings.Contains(system, "read_file") {
-		t.Fatal("stable definition or explicitly granted tool is absent")
+		!strings.Contains(system, "tool_search") {
+		t.Fatal("stable definition or dynamic tool-discovery policy is absent")
 	}
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(user), &payload); err != nil {

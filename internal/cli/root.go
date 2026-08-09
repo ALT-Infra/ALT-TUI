@@ -103,6 +103,7 @@ func Execute(
 		state.profileCommand(),
 		state.sessionCommand(),
 		state.authCommand(),
+		state.researchCommand(),
 		state.completionCommand(root),
 		state.licensesCommand(),
 		state.nativeGUICommand(),

@@ -17,7 +17,7 @@ func TestAuthStatusWithoutNameSummarizesEveryConnection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []string{"exa", "cline", "fireworks", "opencode", "together", "zenmux"} {
+	for _, id := range []string{"exa", "linkup", "cline", "fireworks", "opencode", "together", "zenmux"} {
 		if !strings.Contains(out.String(), id+": not configured") {
 			t.Fatalf("status omitted %s:\n%s", id, out.String())
 		}

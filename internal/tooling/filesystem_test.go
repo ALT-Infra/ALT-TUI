@@ -11,6 +11,7 @@ import (
 	"github.com/cloudwego/eino/adk"
 	adkfilesystem "github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/schema"
 )
 
 func TestRootedBackendRejectsLexicalAndSymlinkEscape(t *testing.T) {
@@ -121,17 +122,13 @@ func TestLargeToolResultIsPreservedOutsideModelContext(t *testing.T) {
 	}
 }
 
-func TestRuntimeHandlersExposeExactCapabilitySet(t *testing.T) {
+func TestRuntimeHandlersExposeCompleteCatalogueThroughToolSearch(t *testing.T) {
 	runtime, err := NewRuntime(context.Background(), t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer runtime.Close()
-	handlers, err := runtime.Handlers(
-		context.Background(),
-		"member:test",
-		[]string{"read_file", "ls"},
-	)
+	handlers, err := runtime.Handlers(context.Background(), "member:test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,8 +139,8 @@ func TestRuntimeHandlersExposeExactCapabilitySet(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if len(runContext.Tools) != 2 {
-		t.Fatalf("tool count = %d, want 2", len(runContext.Tools))
+	if len(runContext.Tools) != len(ToolNames())+1 {
+		t.Fatalf("agent tool count = %d, want %d runtime tools plus tool_search", len(runContext.Tools), len(ToolNames()))
 	}
 	names := make(map[string]bool, len(runContext.Tools))
 	for _, runtimeTool := range runContext.Tools {
@@ -153,22 +150,40 @@ func TestRuntimeHandlersExposeExactCapabilitySet(t *testing.T) {
 		}
 		names[info.Name] = true
 	}
-	if !names["read_file"] || !names["ls"] || names["write_file"] {
-		t.Fatalf("exposed tools = %#v", names)
+	for _, name := range ToolNames() {
+		if !names[name] {
+			t.Fatalf("complete runtime catalogue is missing %q: %#v", name, names)
+		}
+	}
+	if !names["tool_search"] {
+		t.Fatalf("dynamic discovery tool is absent: %#v", names)
+	}
+
+	infos := make([]*schema.ToolInfo, 0, len(runContext.Tools))
+	for _, runtimeTool := range runContext.Tools {
+		info, infoErr := runtimeTool.Info(context.Background())
+		if infoErr != nil {
+			t.Fatal(infoErr)
+		}
+		infos = append(infos, info)
+	}
+	state := &adk.ChatModelAgentState{Messages: []*schema.Message{schema.UserMessage("inspect the workspace")}, ToolInfos: infos}
+	_, state, err = handlers[1].BeforeModelRewriteState(context.Background(), state, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.ToolInfos) != 1 || state.ToolInfos[0].Name != "tool_search" {
+		t.Fatalf("initial model-visible tools = %#v, want only tool_search", state.ToolInfos)
 	}
 }
 
-func TestWebResearchIsAvailableToAnyAssignmentThatReceivesIt(t *testing.T) {
+func TestWebResearchIsDiscoverableByEveryAssignment(t *testing.T) {
 	runtime, err := NewRuntime(context.Background(), t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer runtime.Close()
-	handlers, err := runtime.Handlers(
-		context.Background(),
-		"member:any-role",
-		[]string{ToolNameWebSearch},
-	)
+	handlers, err := runtime.Handlers(context.Background(), "member:any-role")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,14 +194,15 @@ func TestWebResearchIsAvailableToAnyAssignmentThatReceivesIt(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if len(runContext.Tools) != 1 {
-		t.Fatalf("tool count = %d, want 1", len(runContext.Tools))
+	found := false
+	for _, runtimeTool := range runContext.Tools {
+		info, infoErr := runtimeTool.Info(context.Background())
+		if infoErr != nil {
+			t.Fatal(infoErr)
+		}
+		found = found || info.Name == ToolNameWebSearch
 	}
-	info, err := runContext.Tools[0].Info(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Name != ToolNameWebSearch {
-		t.Fatalf("tool = %q, want %q", info.Name, ToolNameWebSearch)
+	if !found {
+		t.Fatalf("%s is absent from the complete discoverable catalogue", ToolNameWebSearch)
 	}
 }

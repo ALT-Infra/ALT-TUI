@@ -201,6 +201,7 @@ type ToolCallData struct {
 	DelegationID string `json:"delegation_id"`
 	ToolCallID   string `json:"tool_call_id"`
 	Tool         string `json:"tool"`
+	Provider     string `json:"provider,omitempty"`
 	Arguments    string `json:"arguments,omitempty"`
 }
 

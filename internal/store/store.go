@@ -170,6 +170,11 @@ func (s *Store) initialize(ctx context.Context) error {
 			value BLOB NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS settings (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
@@ -187,6 +192,39 @@ func (s *Store) initialize(ctx context.Context) error {
 	}
 	if mode != "wal" && mode != "memory" {
 		return fmt.Errorf("sqlite WAL unavailable: journal_mode=%s", mode)
+	}
+	return nil
+}
+
+func (s *Store) Setting(ctx context.Context, key string) (string, bool, error) {
+	if s == nil || s.db == nil {
+		return "", false, fmt.Errorf("store is required")
+	}
+	var value string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, key).Scan(&value)
+	if isNotFound(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read setting %q: %w", key, err)
+	}
+	return value, true, nil
+}
+
+func (s *Store) SetSetting(ctx context.Context, key, value string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("store is required")
+	}
+	if key == "" {
+		return fmt.Errorf("setting key is required")
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		key, value, time.Now().UTC().Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return fmt.Errorf("write setting %q: %w", key, err)
 	}
 	return nil
 }

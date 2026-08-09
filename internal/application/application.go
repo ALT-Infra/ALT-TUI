@@ -16,6 +16,7 @@ import (
 	"altv1/internal/provider/opencode"
 	"altv1/internal/provider/together"
 	"altv1/internal/provider/zenmux"
+	"altv1/internal/research"
 	"altv1/internal/store"
 	"altv1/internal/tooling"
 )
@@ -26,6 +27,7 @@ type Application struct {
 	Providers     *provider.Registry
 	Engine        *orchestrator.Engine
 	RuntimePolicy RuntimePolicy
+	credentials   credential.Store
 }
 
 type Options struct {
@@ -37,8 +39,19 @@ type RuntimePolicy struct {
 	FilesystemConfinement                bool     `json:"filesystem_confinement"`
 	DirectTerminalNetwork                bool     `json:"direct_terminal_network"`
 	ExaConfigured                        bool     `json:"exa_configured"`
+	LinkupConfigured                     bool     `json:"linkup_configured"`
+	ResearchProvider                     string   `json:"research_provider,omitempty"`
 	Tools                                []string `json:"tools"`
 }
+
+type ResearchConnectionStatus struct {
+	ID         string
+	Name       string
+	Configured bool
+	Selected   bool
+}
+
+const researchProviderSetting = "research.provider"
 
 func Open(ctx context.Context) (*Application, error) {
 	dataDir, err := ResolveDataDir("")
@@ -67,7 +80,7 @@ func OpenAtWithOptions(ctx context.Context, dataDir string, options Options) (*A
 		return nil, err
 	}
 	credentials := credential.NewStore(dataDir)
-	sensitiveEnvironment := []string{"EXA_API_KEY"}
+	sensitiveEnvironment := []string{"EXA_API_KEY", "LINKUP_API_KEY"}
 	for _, descriptor := range registry.Descriptors() {
 		if descriptor.CredentialEnvironment != "" {
 			sensitiveEnvironment = append(sensitiveEnvironment, descriptor.CredentialEnvironment)
@@ -79,29 +92,134 @@ func OpenAtWithOptions(ctx context.Context, dataDir string, options Options) (*A
 		DirectTerminalNetwork:                options.DangerouslyBypassApprovalsAndSandbox,
 		Tools:                                tooling.ToolNames(),
 	}
-	if _, _, lookupErr := credentials.Lookup("exa", "EXA_API_KEY"); lookupErr == nil {
-		runtimePolicy.ExaConfigured = true
-	} else if !errors.Is(lookupErr, credential.ErrNotFound) {
-		ledger.Close()
-		return nil, fmt.Errorf("inspect Exa credential: %w", lookupErr)
+	for _, connection := range research.Connections() {
+		_, _, lookupErr := credentials.Lookup(string(connection.ID), connection.CredentialEnvironment)
+		configured := lookupErr == nil
+		if lookupErr != nil && !errors.Is(lookupErr, credential.ErrNotFound) {
+			ledger.Close()
+			return nil, fmt.Errorf("inspect %s credential: %w", connection.Name, lookupErr)
+		}
+		switch connection.ID {
+		case research.ProviderExa:
+			runtimePolicy.ExaConfigured = configured
+		case research.ProviderLinkup:
+			runtimePolicy.LinkupConfigured = configured
+		}
 	}
-	return &Application{
+	var app *Application
+	app = &Application{
 		DataDir:       dataDir,
 		Store:         ledger,
 		Providers:     registry,
 		RuntimePolicy: runtimePolicy,
+		credentials:   credentials,
 		Engine: orchestrator.NewEngineWithOptions(
 			ledger,
 			registry,
 			orchestrator.EngineOptions{
 				DangerouslyBypassApprovalsAndSandbox: options.DangerouslyBypassApprovalsAndSandbox,
 				SensitiveEnvironment:                 sensitiveEnvironment,
-				ResolveExaCredential: func() (string, error) {
-					return credentials.Resolve("exa", "EXA_API_KEY")
-				},
+				ResolveResearchProvider:              func(callCtx context.Context) (string, error) { return app.ResolveResearchProvider(callCtx) },
+				ResolveExaCredential:                 func() (string, error) { return credentials.Resolve("exa", "EXA_API_KEY") },
+				ResolveLinkupCredential:              func() (string, error) { return credentials.Resolve("linkup", "LINKUP_API_KEY") },
 			},
 		),
-	}, nil
+	}
+	if selected, err := app.resolveResearchProvider(ctx, false); err == nil {
+		app.RuntimePolicy.ResearchProvider = string(selected)
+	}
+	return app, nil
+}
+
+func (a *Application) ResearchConnections(ctx context.Context) ([]ResearchConnectionStatus, error) {
+	if a == nil || a.Store == nil {
+		return nil, fmt.Errorf("application is required")
+	}
+	selected, _ := a.resolveResearchProvider(ctx, false)
+	result := make([]ResearchConnectionStatus, 0, len(research.Connections()))
+	for _, connection := range research.Connections() {
+		_, _, err := a.credentials.Lookup(string(connection.ID), connection.CredentialEnvironment)
+		configured := err == nil
+		if err != nil && !errors.Is(err, credential.ErrNotFound) {
+			return nil, fmt.Errorf("inspect %s credential: %w", connection.Name, err)
+		}
+		result = append(result, ResearchConnectionStatus{
+			ID: string(connection.ID), Name: connection.Name,
+			Configured: configured, Selected: connection.ID == selected,
+		})
+	}
+	return result, nil
+}
+
+func (a *Application) SelectResearchProvider(ctx context.Context, raw string) error {
+	selected, err := research.ParseProvider(raw)
+	if err != nil {
+		return err
+	}
+	connection, _ := research.Lookup(selected)
+	if _, _, err := a.credentials.Lookup(string(selected), connection.CredentialEnvironment); err != nil {
+		if errors.Is(err, credential.ErrNotFound) {
+			return fmt.Errorf("%s is not configured; run `alt auth set %s`", connection.Name, selected)
+		}
+		return fmt.Errorf("inspect %s credential: %w", connection.Name, err)
+	}
+	if err := a.Store.SetSetting(ctx, researchProviderSetting, string(selected)); err != nil {
+		return err
+	}
+	switch selected {
+	case research.ProviderExa:
+		a.RuntimePolicy.ExaConfigured = true
+	case research.ProviderLinkup:
+		a.RuntimePolicy.LinkupConfigured = true
+	}
+	a.RuntimePolicy.ResearchProvider = string(selected)
+	return nil
+}
+
+func (a *Application) ResolveResearchProvider(ctx context.Context) (string, error) {
+	selected, err := a.resolveResearchProvider(ctx, true)
+	return string(selected), err
+}
+
+func (a *Application) resolveResearchProvider(ctx context.Context, require bool) (research.Provider, error) {
+	raw, found, err := a.Store.Setting(ctx, researchProviderSetting)
+	if err != nil {
+		return "", err
+	}
+	configured := make([]research.Provider, 0, len(research.Connections()))
+	for _, connection := range research.Connections() {
+		_, _, lookupErr := a.credentials.Lookup(string(connection.ID), connection.CredentialEnvironment)
+		if lookupErr == nil {
+			configured = append(configured, connection.ID)
+			continue
+		}
+		if !errors.Is(lookupErr, credential.ErrNotFound) {
+			return "", fmt.Errorf("inspect %s credential: %w", connection.Name, lookupErr)
+		}
+	}
+	if found {
+		selected, parseErr := research.ParseProvider(raw)
+		if parseErr != nil {
+			return "", fmt.Errorf("stored research provider is invalid: %w", parseErr)
+		}
+		for _, available := range configured {
+			if selected == available {
+				return selected, nil
+			}
+		}
+		connection, _ := research.Lookup(selected)
+		return "", fmt.Errorf("selected research provider %s is not configured; run `alt auth set %s` or choose /research", connection.Name, selected)
+	}
+	if len(configured) == 1 {
+		return configured[0], nil
+	}
+	if !require {
+		return "", nil
+	}
+	if len(configured) == 0 {
+		return "", fmt.Errorf("web research is not configured; run `alt auth set exa` or `alt auth set linkup`")
+	}
+	return "", fmt.Errorf("choose the active research provider with /research")
 }
 
 // NewGatewayRegistry is the single integration composition point. Adding a

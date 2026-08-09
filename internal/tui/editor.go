@@ -14,7 +14,10 @@ type editorFinishedMsg struct {
 	err  error
 }
 
-type authFinishedMsg struct{ err error }
+type authFinishedMsg struct {
+	connection string
+	err        error
+}
 
 func externalEditorCmd(draft string) (tea.Cmd, error) {
 	editor := strings.TrimSpace(os.Getenv("VISUAL"))
@@ -67,6 +70,6 @@ func authSetupCmd(gateway string) (tea.Cmd, error) {
 	}
 	command := exec.Command(executable, "auth", "set", gateway)
 	return tea.ExecProcess(command, func(runErr error) tea.Msg {
-		return authFinishedMsg{err: runErr}
+		return authFinishedMsg{connection: gateway, err: runErr}
 	}), nil
 }

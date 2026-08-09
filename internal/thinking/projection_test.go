@@ -186,6 +186,38 @@ func TestProjectionRetainsCompleteMetadataForGeometryAwarePresentation(t *testin
 	}
 }
 
+func TestProjectionDistinguishesToolDiscoveryAndResearchProvider(t *testing.T) {
+	projection := testProjection(t)
+	apply(t, projection,
+		event.Draft{Kind: event.SessionCreated, Data: event.SessionCreatedData{Task: "research"}},
+		event.Draft{Kind: event.RouterStarted},
+		event.Draft{Kind: event.LeadSelected, Data: event.LeadSelectedData{LeadID: "engineering"}},
+		event.Draft{Kind: event.ToolCalled, Actor: "engineering", Data: event.ToolCallData{
+			ToolCallID: "discover", Tool: "tool_search", Arguments: `{"query":"web evidence"}`,
+		}},
+		event.Draft{Kind: event.ToolCompleted, Actor: "engineering", Data: event.ToolCompletedData{
+			ToolCallID: "discover", Tool: "tool_search", Result: `{"tools":["web_search"]}`,
+		}},
+		event.Draft{Kind: event.ToolCalled, Actor: "engineering", Data: event.ToolCallData{
+			ToolCallID: "search", Tool: "web_search", Provider: "linkup", Arguments: `{"query":"primary evidence"}`,
+		}},
+		event.Draft{Kind: event.ToolCompleted, Actor: "engineering", Data: event.ToolCompletedData{
+			ToolCallID: "search", Tool: "web_search", Result: `{"provider":"linkup","mode":"search"}`,
+		}},
+	)
+	discovery := projection.Active.Nodes["tool:discover"]
+	if discovery == nil || discovery.Kind != "tool-discovery" {
+		t.Fatalf("discovery node = %#v", discovery)
+	}
+	if edge := projection.Active.Edges["flow:tool:discover"]; edge == nil || edge.Kind != "tool-discovery" {
+		t.Fatalf("discovery edge = %#v", edge)
+	}
+	search := projection.Active.Nodes["tool:search"]
+	if search == nil || search.Kind != "tool" || search.Metadata["provider"] != "Linkup" {
+		t.Fatalf("research node = %#v", search)
+	}
+}
+
 func testProjection(t *testing.T) *thinking.Projection {
 	t.Helper()
 	value := profile.Profile{

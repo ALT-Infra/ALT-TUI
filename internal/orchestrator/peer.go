@@ -91,15 +91,15 @@ func (r *sessionRuntime) runPeerMember(
 	attempt int,
 ) (string, error) {
 	capabilities := r.providers.Capabilities(r.profile.Gateway, r.profile.Models[peer.Model])
-	if len(turn.Spec.RequiredTools) > 0 && capabilities.ToolCalling == provider.CapabilityUnsupported {
-		return "", fmt.Errorf("authenticated gateway catalog marks peer %s model %s as tool-call unsupported; required tools: %s", peer.ID, r.profile.Models[peer.Model].Name, strings.Join(turn.Spec.RequiredTools, ", "))
+	if capabilities.ToolCalling == provider.CapabilityUnsupported {
+		return "", fmt.Errorf("authenticated gateway catalog marks peer %s model %s as tool-call unsupported; ALT assignments require dynamic runtime tools", peer.ID, r.profile.Models[peer.Model].Name)
 	}
 	chat, modelSpec, err := r.providers.Model(ctx, r.profile, peer.Model, provider.Text)
 	if err != nil {
 		return "", err
 	}
 	chat = r.observeModel(peer.Model, "peer:"+peer.ID, turn.Spec.ID)(chat)
-	handlers, err := r.tools.Handlers(ctx, "peer:"+peer.ID+":"+turn.Spec.CollaborationID, turn.Spec.RequiredTools)
+	handlers, err := r.tools.Handlers(ctx, "peer:"+peer.ID+":"+turn.Spec.CollaborationID)
 	if err != nil {
 		return "", err
 	}
@@ -115,7 +115,6 @@ func (r *sessionRuntime) runPeerMember(
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent, EnableStreaming: true, CheckPointStore: r.store})
 	iterator := runner.Run(ctx, []*schema.Message{schema.UserMessage(user)}, adk.WithCheckPointID(fmt.Sprintf("peer:%s:%s:%d:%d", r.session.ID, turn.Spec.CollaborationID, turn.Spec.Round, attempt)))
 	var finalCandidate string
-	usedTools := make(map[string]bool)
 	for {
 		item, ok := iterator.Next()
 		if !ok {
@@ -138,10 +137,9 @@ func (r *sessionRuntime) runPeerMember(
 		switch variant.Role {
 		case schema.Assistant:
 			for _, call := range message.ToolCalls {
-				usedTools[call.Function.Name] = true
 				if _, err := r.store.Append(ctx, r.session.ID, event.Draft{
 					Kind: event.ToolCalled, Actor: peer.ID, CorrelationID: turn.Spec.ID,
-					Data: event.ToolCallData{DelegationID: turn.Spec.ID, ToolCallID: call.ID, Tool: call.Function.Name, Arguments: call.Function.Arguments},
+					Data: event.ToolCallData{DelegationID: turn.Spec.ID, ToolCallID: call.ID, Tool: call.Function.Name, Provider: r.tools.ProviderForTool(ctx, call.Function.Name), Arguments: call.Function.Arguments},
 				}); err != nil {
 					return "", err
 				}
@@ -160,11 +158,6 @@ func (r *sessionRuntime) runPeerMember(
 			}); err != nil {
 				return "", err
 			}
-		}
-	}
-	for _, name := range turn.Spec.RequiredTools {
-		if !usedTools[name] {
-			return "", fmt.Errorf("peer returned without calling required tool %s", name)
 		}
 	}
 	return finalCandidate, nil

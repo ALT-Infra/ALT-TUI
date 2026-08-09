@@ -193,8 +193,8 @@ func TestSlashPopupMatchesCodexOrderingAndAliasRules(t *testing.T) {
 	if got := commands("/sum"); len(got) != 0 {
 		t.Fatalf("substring-only query produced fuzzy guesses: %v", got)
 	}
-	if got := commands("/re"); !reflect.DeepEqual(got, []string{"/resume", "/rename"}) {
-		t.Fatalf("prefix ordering = %v, want registry order [/resume /rename]", got)
+	if got := commands("/re"); !reflect.DeepEqual(got, []string{"/research", "/resume", "/rename"}) {
+		t.Fatalf("prefix ordering = %v, want registry order [/research /resume /rename]", got)
 	}
 }
 
@@ -876,8 +876,8 @@ func TestAuthOpensRegisteredGatewayPicker(t *testing.T) {
 		t.Fatal("/auth did not open the gateway picker")
 	}
 	descriptors := model.app.Providers.Descriptors()
-	if got := len(model.picker.Items()); got != len(descriptors)+1 {
-		t.Fatalf("connection picker contains %d entries, want %d", got, len(descriptors)+1)
+	if got := len(model.picker.Items()); got != len(descriptors)+2 {
+		t.Fatalf("connection picker contains %d entries, want %d", got, len(descriptors)+2)
 	}
 	for index, descriptor := range descriptors {
 		item, ok := model.picker.Items()[index].(pickerItem)
@@ -891,6 +891,35 @@ func TestAuthOpensRegisteredGatewayPicker(t *testing.T) {
 	exa, ok := model.picker.Items()[len(descriptors)].(pickerItem)
 	if !ok || exa.kind != "gateway" || exa.reference != "exa" {
 		t.Fatalf("Exa connection entry = %#v", model.picker.Items()[len(descriptors)])
+	}
+	linkup, ok := model.picker.Items()[len(descriptors)+1].(pickerItem)
+	if !ok || linkup.kind != "gateway" || linkup.reference != "linkup" {
+		t.Fatalf("Linkup connection entry = %#v", model.picker.Items()[len(descriptors)+1])
+	}
+}
+
+func TestResearchCommandOpensProviderPickerWithSetupState(t *testing.T) {
+	model, closeApp := testModel(t)
+	defer closeApp()
+	updated, command := model.handleCommand("/research")
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("/research did not load provider readiness")
+	}
+	message := command()
+	updated, _ = model.Update(message)
+	model = updated.(Model)
+	if model.picker == nil || model.picker.Title != "Research mode" {
+		t.Fatalf("research picker = %#v", model.picker)
+	}
+	if len(model.picker.Items()) != 2 {
+		t.Fatalf("research provider count = %d, want 2", len(model.picker.Items()))
+	}
+	for _, raw := range model.picker.Items() {
+		item := raw.(pickerItem)
+		if item.kind != "research-provider" || item.configured || !strings.Contains(item.description, "setup required") {
+			t.Fatalf("unconfigured provider row = %#v", item)
+		}
 	}
 }
 

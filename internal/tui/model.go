@@ -110,6 +110,14 @@ type profileSelectedMsg struct {
 }
 
 type profilesMsg struct{ items []store.ProfileSummary }
+type researchConnectionsMsg struct {
+	items []application.ResearchConnectionStatus
+	err   error
+}
+type researchProviderSelectedMsg struct {
+	provider string
+	err      error
+}
 type sessionPageMsg struct {
 	generation uint64
 	page       store.SessionPage
@@ -556,6 +564,21 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case profilesMsg:
 		m.openProfiles(msg.items)
 		return m, nil
+	case researchConnectionsMsg:
+		if msg.err != nil {
+			m.status = "research providers unavailable: " + msg.err.Error()
+			return m, nil
+		}
+		m.openResearchConnections(msg.items)
+		return m, nil
+	case researchProviderSelectedMsg:
+		m.input.Focus()
+		if msg.err != nil {
+			m.status = "research mode: " + msg.err.Error()
+		} else {
+			m.status = msg.provider + " research selected"
+		}
+		return m, nil
 	case sessionPageMsg:
 		cmd := m.applySessionPage(msg)
 		return m, tea.Batch(cmd, m.maybeLoadNextPickerPage())
@@ -651,8 +674,12 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case authFinishedMsg:
 		m.input.Focus()
 		if msg.err != nil {
-			m.status = "gateway setup: " + msg.err.Error()
+			m.status = "connection setup: " + msg.err.Error()
 		} else {
+			if msg.connection == "exa" || msg.connection == "linkup" {
+				m.status = msg.connection + " configured · selecting research mode"
+				return m, selectResearchProviderCmd(m.ctx, m.app, msg.connection)
+			}
 			m.status = "gateway credential configured"
 		}
 	}
@@ -821,8 +848,15 @@ func (m Model) handleCommand(command string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.openGateways(m.app.Providers.Descriptors())
-		m.status = "choose an inference gateway"
+		m.status = "choose a connection"
 		return m, nil
+	case "/research":
+		if len(fields) != 1 {
+			m.status = "usage: /research"
+			return m, nil
+		}
+		m.status = "loading research providers"
+		return m, loadResearchConnectionsCmd(m.ctx, m.app)
 	case "/profile":
 		if len(fields) == 1 {
 			return m, loadProfilesCmd(m.ctx, m.app.Store)
@@ -1159,6 +1193,20 @@ func loadProfilesCmd(ctx context.Context, ledger *store.Store) tea.Cmd {
 			return errorMsg{err}
 		}
 		return profilesMsg{items: items}
+	}
+}
+
+func loadResearchConnectionsCmd(ctx context.Context, app *application.Application) tea.Cmd {
+	return func() tea.Msg {
+		items, err := app.ResearchConnections(ctx)
+		return researchConnectionsMsg{items: items, err: err}
+	}
+}
+
+func selectResearchProviderCmd(ctx context.Context, app *application.Application, provider string) tea.Cmd {
+	return func() tea.Msg {
+		err := app.SelectResearchProvider(ctx, provider)
+		return researchProviderSelectedMsg{provider: provider, err: err}
 	}
 }
 

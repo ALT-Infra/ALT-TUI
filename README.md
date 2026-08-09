@@ -23,7 +23,8 @@ Running `alt` opens the terminal interface. ALT starts without a selected Team a
 | `/profile` | Select an immutable Team revision. |
 | `/team [id[@revision]]` | Open the native Team graph; switch among New Team, Edit Team, and Inspect Team inside the window. |
 | `/thinking` | Toggle the live execution graph for the active conversation. |
-| `/auth` | Configure a gateway or Exa credential. |
+| `/auth` | Configure a gateway or research credential. |
+| `/research` | Choose Exa or Linkup for web research. |
 | `/resume` | Search and resume durable conversations. |
 | `/new` | Start a new conversation. |
 | `/rename` | Rename the active conversation. |
@@ -48,25 +49,28 @@ alt auth status
 alt auth models opencode
 alt auth test opencode
 alt auth set exa
+alt auth set linkup
+alt research status
+alt research set exa
 ```
 
-Gateway authentication tests list the authenticated catalog and do not spend model tokens. ClinePass first validates the account token against Cline's authenticated models endpoint, then presents the current pass and free catalog without substituting IDs. The Exa test performs one explicit minimal search because successful search authorization cannot be established from a model catalog.
+Gateway authentication tests list the authenticated catalog and do not spend model tokens. ClinePass first validates the account token against Cline's authenticated models endpoint, then presents the current pass and free catalog without substituting IDs. Exa and Linkup tests perform one explicit minimal search because successful search authorization cannot be established from a catalog. If exactly one research connection is configured, ALT uses it without ceremony; if both are configured, `/research` or `alt research set` chooses the active one.
 
 Credentials are stored in the operating system credential service when it is available. ALT otherwise reports that it is using a private `0600` fallback file in its data directory. The data directory is selected from `--data-dir`, `$ALT_HOME`, `$XDG_DATA_HOME/alt-v1`, or `~/.local/share/alt-v1`.
 
 ## Tools and terminal authority
 
-Runtime tools are product infrastructure, not Team roles. Every eligible model can be given the same file, search, patch, process, and web-research capabilities when an invocation requires them. The current surface includes directory listing, file reading and writing, bounded editing, globbing, text search, command execution, persistent process input, strict patch application, and Exa-backed web research.
+Runtime tools are product infrastructure, not Team roles. Every Lead, peer, and specialist can discover the complete file, search, patch, process, and web-research catalogue. Eino's dynamic ToolSearch middleware initially exposes only discovery, then reveals relevant schemas as the work evolves; Team prose never has to predict a later `grep`, process continuation, or exact fetch. ALT still governs execution by workspace authority and runtime policy. The current surface includes directory listing, file reading and writing, bounded editing, globbing, text search, command execution, persistent process input, strict patch application, and provider-backed web research.
 
 Safe mode composes Bubblewrap namespaces, `no_new_privs`, and Landlock ABI V3. Commands can read the host filesystem, write only the session workspace and ALT's private temporary directory, and cannot use the host PID, IPC, or UTS namespaces. Direct network access is isolated. Process sessions belong to the assignment that created them and are terminated with that assignment.
 
 `--dangerously-bypass-approvals-and-sandbox` deliberately bypasses Bubblewrap, Landlock, `no_new_privs`, and configured approval gates. ALT still retains process ownership and credential redaction because those are correctness properties, not sandbox restrictions. Both the terminal and native windows display the active authority state.
 
-`web_search` uses a separate Exa credential for semantic search, retrieved page contents, and exact-URL retrieval. The credential is resolved by ALT for each call and is never placed in a model's shell environment.
+Web research is an independently selected connection, never part of Team model identity. Exa provides current semantic/deep discovery, rich content controls, exact multi-URL retrieval, and cited answer cross-checks. Linkup provides fast, standard, or multi-iteration deep discovery, source-bearing structured extraction, exact Markdown retrieval with optional JavaScript rendering, and sourced answer cross-checks. The model sees the same `web_search`, `web_fetch`, and `web_answer` concepts with provider-specific schemas; ALT resolves credentials per call and never places them in a model shell. Search and generated answers remain discovery or corroboration until decisive claims are checked against fetched primary evidence.
 
 ## Live execution graph
 
-`/thinking` shows the observable flow of work in real time: request arrival, routing, Lead activity, downward delegations, concurrent and sequential branches, tool calls, returns, cancellation, recovery, and finalization. Provider-supplied reasoning can be inspected only when the provider returned it and the disclosure policy recorded it. ALT does not manufacture private chain-of-thought.
+`/thinking` shows the observable flow of work in real time: request arrival, routing, Lead activity, downward delegations, concurrent and sequential branches, tool calls, returns, cancellation, recovery, and finalization. Dynamic tool discovery appears as compact discovery activity rather than masquerading as substantive work; research calls identify the selected connection and retain complete arguments and results for inspection. Provider-supplied reasoning can be inspected only when the provider returned it and the disclosure policy recorded it. ALT does not manufacture private chain-of-thought.
 
 The projection is derived from typed, ordered, durable events. Causal edges come from recorded relationships rather than insertion order, and a repaint is triggered by applied state rather than a polling animation. This distinction matters when branches overlap: two events occurring near each other are not presented as dependent unless the runtime recorded a dependency.
 

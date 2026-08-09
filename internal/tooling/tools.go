@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/middlewares/dynamictool/toolsearch"
 	"github.com/cloudwego/eino/components/tool"
 	toolutils "github.com/cloudwego/eino/components/tool/utils"
 )
@@ -15,6 +16,8 @@ const (
 	ToolNameWriteStdin  = "write_stdin"
 	ToolNameApplyPatch  = "apply_patch"
 	ToolNameWebSearch   = "web_search"
+	ToolNameWebFetch    = "web_fetch"
+	ToolNameWebAnswer   = "web_answer"
 )
 
 var allRuntimeTools = append(
@@ -23,19 +26,20 @@ var allRuntimeTools = append(
 	ToolNameWriteStdin,
 	ToolNameApplyPatch,
 	ToolNameWebSearch,
+	ToolNameWebFetch,
+	ToolNameWebAnswer,
 )
 
 func ToolNames() []string {
 	return append([]string(nil), allRuntimeTools...)
 }
 
-// Handlers exposes the full runtime tool suite when allowed is nil, or exactly
-// the named subset for a delegated member. Process sessions are scoped to
+// Handlers gives every assignment the complete runtime tool catalogue through
+// Eino's dynamic ToolSearch middleware. Process sessions remain scoped to
 // owner, so concurrent assignments cannot write to or poll each other's PTYs.
 func (r *Runtime) Handlers(
 	ctx context.Context,
 	owner string,
-	allowed []string,
 ) ([]adk.ChatModelAgentMiddleware, error) {
 	if r == nil {
 		return nil, fmt.Errorf("tool runtime is required")
@@ -45,47 +49,46 @@ func (r *Runtime) Handlers(
 		return nil, fmt.Errorf("tool owner is required")
 	}
 	enabled := make(map[string]bool, len(allRuntimeTools))
-	if allowed == nil {
-		for _, name := range allRuntimeTools {
-			enabled[name] = true
-		}
-	} else {
-		supported := make(map[string]struct{}, len(allRuntimeTools))
-		for _, name := range allRuntimeTools {
-			supported[name] = struct{}{}
-		}
-		for _, name := range allowed {
-			if _, ok := supported[name]; !ok {
-				return nil, fmt.Errorf("unsupported runtime tool %q", name)
-			}
-			enabled[name] = true
-		}
+	for _, name := range allRuntimeTools {
+		enabled[name] = true
 	}
 
-	filesystemHandlers, err := r.filesystemHandler(ctx, allowed)
+	filesystemTools, filesystemInstruction, reducer, err := r.filesystemTools(ctx)
 	if err != nil {
 		return nil, err
 	}
-	nativeTools, err := r.nativeTools(owner, enabled)
+	nativeTools, err := r.nativeTools(ctx, owner, enabled)
 	if err != nil {
 		return nil, err
 	}
-	handlers := append([]adk.ChatModelAgentMiddleware(nil), filesystemHandlers...)
+	deferred := append([]tool.BaseTool(nil), filesystemTools...)
+	deferred = append(deferred, nativeTools...)
+	dynamic, err := toolsearch.New(ctx, &toolsearch.Config{DynamicTools: deferred})
+	if err != nil {
+		return nil, fmt.Errorf("create Eino dynamic tool search: %w", err)
+	}
+	handlers := []adk.ChatModelAgentMiddleware{
+		&toolMiddleware{
+			BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
+			instruction:                  filesystemInstruction,
+		},
+		dynamic,
+		reducer,
+	}
 	if len(nativeTools) > 0 {
 		executionPolicy := "exec_command runs inside ALT's fail-closed Linux sandbox: Bubblewrap isolates filesystem mounts, processes, IPC, UTS, and direct networking; no_new_privs and Landlock restrict privilege transitions and writes. It may read the host filesystem, but may write only the session workspace and ALT's private temporary directory."
 		if r.options.DangerouslyBypassApprovalsAndSandbox {
 			executionPolicy = "DANGEROUS MODE: exec_command bypasses ALT's approval and sandbox boundary and executes directly on the host. Treat every command as having the user's ambient operating-system authority."
 		}
-		handlers = append(handlers, &toolMiddleware{
+		handlers[0] = &toolMiddleware{
 			BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
-			instruction:                  executionPolicy + " Running commands return a numeric session_id for write_stdin; copy that exact ID when polling or sending input. An unknown-process lookup does not prove that the process ended: if the ID was transcribed incorrectly, retry with the exact session_id from the latest running result. apply_patch accepts strict Git or standard unified text patches and validates every path against the workspace before changing files. web_search uses the user's separate Exa credential and returns retrieved page text; titles and snippets alone are never evidence. Credentials are never exposed to shell commands.",
-			tools:                        nativeTools,
-		})
+			instruction:                  filesystemInstruction + "\n" + executionPolicy + " Running commands return a numeric session_id for write_stdin; copy that exact ID when polling or sending input. An unknown-process lookup does not prove that the process ended: if the ID was transcribed incorrectly, retry with the exact session_id from the latest running result. apply_patch accepts strict Git or standard unified text patches and validates every path against the workspace before changing files. Discover runtime tools with tool_search as the work requires them. web_search discovers sources, web_fetch retrieves exact source content, and web_answer supplies an independent cited synthesis. Search output and generated answers are not substitutes for checking decisive claims against fetched primary evidence. Credentials are never exposed to shell commands.",
+		}
 	}
 	return handlers, nil
 }
 
-func (r *Runtime) nativeTools(owner string, enabled map[string]bool) ([]tool.BaseTool, error) {
+func (r *Runtime) nativeTools(ctx context.Context, owner string, enabled map[string]bool) ([]tool.BaseTool, error) {
 	var tools []tool.BaseTool
 	if enabled[ToolNameExecCommand] {
 		value, err := toolutils.InferTool(
@@ -125,11 +128,111 @@ func (r *Runtime) nativeTools(owner string, enabled map[string]bool) ([]tool.Bas
 		}
 		tools = append(tools, value)
 	}
-	if enabled[ToolNameWebSearch] {
+	researchProvider, researchErr := r.researchProvider(ctx)
+	if researchErr != nil && (enabled[ToolNameWebSearch] || enabled[ToolNameWebFetch] || enabled[ToolNameWebAnswer]) {
+		return r.nativeToolsWithUnavailableResearch(owner, enabled, tools, researchErr)
+	}
+	if enabled[ToolNameWebSearch] && researchProvider == "exa" {
 		value, err := toolutils.InferTool(
 			ToolNameWebSearch,
-			"Search and retrieve web evidence through the user's Exa connection, or retrieve exact URLs. Search snippets are leads; retrieved page text is evidence.",
-			r.webSearch,
+			"Discover web sources through Exa. Supports fast through deep-reasoning search, domain/date/category controls, alternate deep queries, current content extraction, subpage discovery, and grounded synthesized output. Use web_fetch to verify decisive sources.",
+			r.exaWebSearch,
+		)
+		if err != nil {
+			return nil, err
+		}
+		tools = append(tools, value)
+	}
+	if enabled[ToolNameWebFetch] && researchProvider == "exa" {
+		value, err := toolutils.InferTool(
+			ToolNameWebFetch,
+			"Retrieve exact URLs or Exa document IDs with configurable text, highlights, structured summaries, freshness, semantic sections, subpages, and outgoing links. Use returned statuses and page content as evidence.",
+			r.exaWebFetch,
+		)
+		if err != nil {
+			return nil, err
+		}
+		tools = append(tools, value)
+	}
+	if enabled[ToolNameWebAnswer] && researchProvider == "exa" {
+		value, err := toolutils.InferTool(
+			ToolNameWebAnswer,
+			"Ask Exa for an independent answer with citations, optionally structured by JSON Schema. Treat it as a cross-check and inspect or fetch the cited sources before relying on material claims.",
+			r.exaWebAnswer,
+		)
+		if err != nil {
+			return nil, err
+		}
+		tools = append(tools, value)
+	}
+	if researchProvider == "linkup" {
+		return r.appendLinkupTools(enabled, tools)
+	}
+	return tools, nil
+}
+
+type unavailableResearchInput struct {
+	Query string   `json:"query,omitempty" jsonschema:"description=Research query, retained so the setup error can explain how to enable web research."`
+	URLs  []string `json:"urls,omitempty" jsonschema:"description=Exact URLs intended for retrieval."`
+}
+
+func (r *Runtime) researchProvider(ctx context.Context) (string, error) {
+	if r.options.ResolveResearchProvider == nil {
+		if r.options.ResolveExaCredential != nil {
+			return "exa", nil
+		}
+		return "", fmt.Errorf("web research is not configured; choose a provider with /research")
+	}
+	provider, err := r.options.ResolveResearchProvider(ctx)
+	if err != nil {
+		return "", err
+	}
+	switch provider {
+	case "exa", "linkup":
+		return provider, nil
+	default:
+		return "", fmt.Errorf("unsupported selected research provider %q", provider)
+	}
+}
+
+// ProviderForTool pins the provider used by a provider-backed tool into the
+// durable call event. It is deliberately empty for local tools and when setup
+// is incomplete; execution still returns the authoritative setup error.
+func (r *Runtime) ProviderForTool(ctx context.Context, name string) string {
+	switch name {
+	case ToolNameWebSearch, ToolNameWebFetch, ToolNameWebAnswer:
+		provider, err := r.researchProvider(ctx)
+		if err == nil {
+			return provider
+		}
+	}
+	return ""
+}
+
+func (r *Runtime) nativeToolsWithUnavailableResearch(
+	owner string,
+	enabled map[string]bool,
+	tools []tool.BaseTool,
+	researchErr error,
+) ([]tool.BaseTool, error) {
+	_ = owner
+	for _, specification := range []struct {
+		name        string
+		description string
+	}{
+		{ToolNameWebSearch, "Web source discovery is unavailable until the user configures and selects a research provider."},
+		{ToolNameWebFetch, "Exact web retrieval is unavailable until the user configures and selects a research provider."},
+		{ToolNameWebAnswer, "Independent cited web synthesis is unavailable until the user configures and selects a research provider."},
+	} {
+		if !enabled[specification.name] {
+			continue
+		}
+		value, err := toolutils.InferTool(
+			specification.name,
+			specification.description,
+			func(context.Context, unavailableResearchInput) (WebResearchResult, error) {
+				return WebResearchResult{}, researchErr
+			},
 		)
 		if err != nil {
 			return nil, err

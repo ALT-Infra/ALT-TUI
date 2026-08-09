@@ -71,8 +71,7 @@ Return only JSON:
       "member_id": "permitted member id",
       "objective": "self-contained bounded task",
       "context": "only context needed beyond the supplied state",
-      "depends_on": ["existing delegation id or an earlier key in this decision"],
-      "required_tools": ["runtime tool names that must actually be called"]
+      "depends_on": ["existing delegation id or an earlier key in this decision"]
     }
   ],
   "peer_turns": [
@@ -81,8 +80,7 @@ Return only JSON:
       "peer_id": "permitted peer id",
       "collaboration_id": "existing collaboration id to continue, or empty to begin",
       "objective": "the next concrete contribution sought from the peer",
-      "context": "new context for this round",
-      "required_tools": ["runtime tool names that must actually be called"]
+      "context": "new context for this round"
     }
   ],
   "cancel": ["active delegation ids no longer useful"],
@@ -94,16 +92,11 @@ Use an empty delegation list while useful work is already running. Set finalize
 only when you can synthesize the answer from current evidence; final_brief then
 states what the final synthesis must emphasize. If no useful work is active and
 you create no delegation, set finalize true; an idle non-final decision cannot
-make progress. When an objective depends on workspace evidence, name the
-minimum required tools; ALT will reject a result that did not call them. Leave
-required_tools empty for conceptual work.
-The required_tools list is also the member's complete runtime tool
-capability set for that delegation. Include every tool the objective needs and
-no others.
+make progress.
 
 Every called member starts fresh and stateless. It receives only its stable
-member definition, the objective and context you author for that call, and the
-runtime tools you explicitly require. A dependency controls scheduling only;
+member definition, the objective and context you author for that call, and a
+runtime tool catalogue it may discover as needed. A dependency controls scheduling only;
 its result is not transmitted to a later member. If later work needs earlier
 evidence, curate the relevant evidence into that call's context.
 
@@ -213,10 +206,6 @@ Return only JSON:
   "confidence": 0.0
 }`
 	system += "\n\nThe user defined this contributor in the following words:\n" + p.MemberDefinition(peer)
-	if len(turn.Spec.RequiredTools) > 0 {
-		system += "\n\nRequired tool calls:\n- " + strings.Join(turn.Spec.RequiredTools, "\n- ")
-		system += "\nCall every required tool before returning the result."
-	}
 	type priorRound struct {
 		Round     int      `json:"round"`
 		Objective string   `json:"objective"`
@@ -259,11 +248,7 @@ Return only JSON:
 }`
 	system += "\n\nThe user defined this member assignment in the following words:\n" +
 		p.MemberDefinition(member)
-	if len(delegation.Spec.RequiredTools) > 0 {
-		system += "\n\nRequired tool calls:\n- " + strings.Join(delegation.Spec.RequiredTools, "\n- ")
-		system += "\nYou must call every required tool before returning the final JSON result."
-	}
-	system += "\nOnly the listed runtime tools are available. Do not create a result file unless the objective explicitly requires a file; return the result in the final assistant message. Never announce work you intend to do later. Call a tool now, or return the complete final JSON result now."
+	system += "\nDiscover runtime tools with tool_search when the objective needs them. Do not create a result file unless the objective explicitly requires a file; return the result in the final assistant message. Never announce work you intend to do later. Call a tool now, or return the complete final JSON result now."
 	payload := map[string]any{
 		"objective": delegation.Spec.Objective,
 		"context":   delegation.Spec.Context,

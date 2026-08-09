@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"altv1/internal/application"
 	"altv1/internal/provider"
 	"altv1/internal/store"
 
@@ -22,6 +23,7 @@ type pickerItem struct {
 	reference   string
 	title       string
 	description string
+	configured  bool
 	session     *sessionPickerMeta
 }
 
@@ -112,7 +114,8 @@ func (m *Model) openCommandPalette() {
 		pickerItem{kind: "command", reference: "/resume", title: "Resume session", description: "Search durable conversation history"},
 		pickerItem{kind: "command", reference: "/profile", title: "Choose Team Profile", description: "Search immutable profile revisions"},
 		pickerItem{kind: "command", reference: "/team", title: "Team", description: "Create, edit, or inspect a Team in one graph window"},
-		pickerItem{kind: "command", reference: "/auth", title: "Configure connection", description: "Store a gateway or Exa API key with hidden input"},
+		pickerItem{kind: "command", reference: "/auth", title: "Configure connection", description: "Store a gateway or research API key with hidden input"},
+		pickerItem{kind: "command", reference: "/research", title: "Research mode", description: "Choose Exa or Linkup for web research"},
 		pickerItem{kind: "command", reference: "/rename", title: "Rename session", description: "Give the active session a memorable title"},
 		pickerItem{kind: "command", reference: "/copy", title: "Copy last response", description: "Copy the last answer as Markdown"},
 		pickerItem{kind: "command", reference: "/status", title: "Session status", description: "Show current session configuration and usage"},
@@ -253,7 +256,7 @@ func (m Model) profilePickerView(width int) string {
 }
 
 func (m *Model) openGateways(items []provider.GatewayDescriptor) {
-	values := make([]list.Item, 0, len(items)+1)
+	values := make([]list.Item, 0, len(items)+2)
 	for _, item := range items {
 		description := item.ID + " · store or replace API key"
 		if item.Authentication == provider.AuthenticationDeviceOAuth {
@@ -272,7 +275,37 @@ func (m *Model) openGateways(items []provider.GatewayDescriptor) {
 		title:       "Exa web research",
 		description: "exa · store or replace research credential",
 	})
+	values = append(values, pickerItem{
+		kind:        "gateway",
+		reference:   "linkup",
+		title:       "Linkup web research",
+		description: "linkup · store or replace research credential",
+	})
 	picker := newCodexPicker(values, max(30, m.width-10), max(10, m.height-8), "Configure connection")
+	m.picker = &picker
+	m.pickerPage = nil
+	m.profilePicker = false
+	m.input.Blur()
+}
+
+func (m *Model) openResearchConnections(items []application.ResearchConnectionStatus) {
+	values := make([]list.Item, 0, len(items))
+	for _, item := range items {
+		description := item.ID
+		switch {
+		case item.Selected:
+			description += " · current"
+		case item.Configured:
+			description += " · ready"
+		default:
+			description += " · setup required"
+		}
+		values = append(values, pickerItem{
+			kind: "research-provider", reference: item.ID,
+			title: item.Name, description: description, configured: item.Configured,
+		})
+	}
+	picker := newCodexPicker(values, max(30, m.width-10), max(10, m.height-8), "Research mode")
 	m.picker = &picker
 	m.pickerPage = nil
 	m.profilePicker = false
@@ -496,6 +529,19 @@ func (m Model) activatePickerItem(item pickerItem) (tea.Model, tea.Cmd) {
 		m.input.Blur()
 		m.status = "configuring " + item.reference + " credential"
 		return m, command
+	case "research-provider":
+		if !item.configured {
+			command, err := authSetupCmd(item.reference)
+			if err != nil {
+				m.status = err.Error()
+				return m, nil
+			}
+			m.input.Blur()
+			m.status = "configuring " + item.reference + " research credential"
+			return m, command
+		}
+		m.status = "selecting " + item.reference + " research"
+		return m, selectResearchProviderCmd(m.ctx, m.app, item.reference)
 	case "session":
 		if m.starting || (m.run != nil && m.app.Engine.Active(m.sessionID)) {
 			m.status = "another session is active"

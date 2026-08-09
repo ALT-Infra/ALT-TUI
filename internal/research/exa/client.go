@@ -28,12 +28,23 @@ type SearchRequest struct {
 	StartPublishedDate string         `json:"startPublishedDate,omitempty"`
 	EndPublishedDate   string         `json:"endPublishedDate,omitempty"`
 	Category           string         `json:"category,omitempty"`
-	Contents           map[string]any `json:"contents"`
+	AdditionalQueries  []string       `json:"additionalQueries,omitempty"`
+	UserLocation       string         `json:"userLocation,omitempty"`
+	Moderation         bool           `json:"moderation,omitempty"`
+	SystemPrompt       string         `json:"systemPrompt,omitempty"`
+	OutputSchema       map[string]any `json:"outputSchema,omitempty"`
+	Contents           map[string]any `json:"contents,omitempty"`
 }
 
 type ContentsRequest struct {
 	URLs     []string       `json:"urls"`
 	Contents map[string]any `json:"-"`
+}
+
+type AnswerRequest struct {
+	Query        string         `json:"query"`
+	Text         bool           `json:"text,omitempty"`
+	OutputSchema map[string]any `json:"outputSchema,omitempty"`
 }
 
 func (c Client) Search(ctx context.Context, request SearchRequest) (map[string]any, error) {
@@ -54,6 +65,14 @@ func (c Client) Contents(ctx context.Context, request ContentsRequest) (map[stri
 		payload[key] = value
 	}
 	return c.request(ctx, "/contents", payload)
+}
+
+func (c Client) Answer(ctx context.Context, request AnswerRequest) (map[string]any, error) {
+	request.Query = strings.TrimSpace(request.Query)
+	if request.Query == "" {
+		return nil, fmt.Errorf("query is required")
+	}
+	return c.request(ctx, "/answer", request)
 }
 
 func (c Client) request(ctx context.Context, path string, payload any) (map[string]any, error) {

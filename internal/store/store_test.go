@@ -403,6 +403,28 @@ func TestSubscriptionObservesAnotherProcessStore(t *testing.T) {
 	}
 }
 
+func TestSettingsRoundTripAndReplaceAtomically(t *testing.T) {
+	ctx := context.Background()
+	ledger, err := store.OpenMemory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	if value, found, err := ledger.Setting(ctx, "research.provider"); err != nil || found || value != "" {
+		t.Fatalf("missing setting = (%q, %v, %v)", value, found, err)
+	}
+	if err := ledger.SetSetting(ctx, "research.provider", "exa"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.SetSetting(ctx, "research.provider", "linkup"); err != nil {
+		t.Fatal(err)
+	}
+	value, found, err := ledger.Setting(ctx, "research.provider")
+	if err != nil || !found || value != "linkup" {
+		t.Fatalf("current setting = (%q, %v, %v)", value, found, err)
+	}
+}
+
 func mustProfile(t *testing.T) *profile.Document {
 	t.Helper()
 	document, err := profile.Parse(builtinprofiles.Engineering)

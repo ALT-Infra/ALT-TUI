@@ -169,6 +169,8 @@ func (h *Host) exchange(request Request) Response {
 				FilesystemConfinement:                h.app.RuntimePolicy.FilesystemConfinement,
 				DirectTerminalNetwork:                h.app.RuntimePolicy.DirectTerminalNetwork,
 				ExaConfigured:                        h.app.RuntimePolicy.ExaConfigured,
+				LinkupConfigured:                     h.app.RuntimePolicy.LinkupConfigured,
+				ResearchProvider:                     h.app.RuntimePolicy.ResearchProvider,
 				Tools:                                append([]string(nil), h.app.RuntimePolicy.Tools...),
 			},
 		}

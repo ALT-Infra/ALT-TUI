@@ -41,6 +41,7 @@ type statusSnapshot struct {
 	tokens      string
 	queue       string
 	permissions string
+	research    string
 }
 
 type placedStatusSnapshot struct {
@@ -224,10 +225,15 @@ func (m Model) captureStatus() statusSnapshot {
 	if m.app.RuntimePolicy.DangerouslyBypassApprovalsAndSandbox {
 		permissions = "dangerous host access"
 	}
+	researchProvider := m.app.RuntimePolicy.ResearchProvider
+	if researchProvider == "" {
+		researchProvider = "not selected"
+	}
 	return statusSnapshot{
 		team: team, session: session, state: state, directory: m.workspace,
 		members: members, tokens: tokens,
 		queue: fmt.Sprintf("%d prompts", len(m.queued)), permissions: permissions,
+		research: researchProvider,
 	}
 }
 
@@ -255,6 +261,7 @@ func renderStatusSnapshot(snapshot statusSnapshot, width int, dark bool) string 
 		row("Token usage", snapshot.tokens),
 		row("Queue", snapshot.queue),
 		row("Permissions", snapshot.permissions),
+		row("Research", snapshot.research),
 		"╰" + border + "╯",
 	}
 	for index := 2; index < len(lines); index++ {

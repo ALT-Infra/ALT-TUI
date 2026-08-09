@@ -11,7 +11,9 @@ import (
 	"altv1/internal/application"
 	"altv1/internal/credential"
 	"altv1/internal/provider"
+	"altv1/internal/research"
 	"altv1/internal/research/exa"
+	"altv1/internal/research/linkup"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -36,7 +38,7 @@ func (s *commandState) authSetCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:     "set <connection>",
 		Short:   "Configure a gateway or research connection",
-		Example: "  alt auth set opencode\n  alt auth set cline\n  alt auth set exa",
+		Example: "  alt auth set opencode\n  alt auth set cline\n  alt auth set exa\n  alt auth set linkup",
 		Args:    cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			connection, err := s.authConnection(args)
@@ -174,30 +176,40 @@ func (s *commandState) credentialStore() (credential.Store, error) {
 func (s *commandState) authTestCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "test <connection>",
-		Short: "Authenticate with a live catalog or minimal Exa search",
+		Short: "Authenticate with a live catalog or minimal research search",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			connection, err := s.authConnection(args)
 			if err != nil {
 				return err
 			}
-			if connection.ID == "exa" {
+			if connection.ID == "exa" || connection.ID == "linkup" {
 				credentials, err := s.credentialStore()
 				if err != nil {
 					return err
 				}
-				client := exa.Client{ResolveCredential: func() (string, error) {
-					return credentials.Resolve("exa", "EXA_API_KEY")
-				}}
-				response, err := client.Search(s.ctx, exa.SearchRequest{
-					Query: "Exa", NumResults: 1,
-					Contents: map[string]any{"text": false},
-				})
+				var response map[string]any
+				switch connection.ID {
+				case "exa":
+					client := exa.Client{ResolveCredential: func() (string, error) {
+						return credentials.Resolve("exa", "EXA_API_KEY")
+					}}
+					response, err = client.Search(s.ctx, exa.SearchRequest{
+						Query: "Exa", NumResults: 1,
+					})
+				case "linkup":
+					client := linkup.Client{ResolveCredential: func() (string, error) {
+						return credentials.Resolve("linkup", "LINKUP_API_KEY")
+					}}
+					response, err = client.Search(s.ctx, linkup.SearchRequest{
+						Query: "Linkup", Depth: "fast", OutputType: "searchResults", MaxResults: 1,
+					})
+				}
 				if err != nil {
 					return err
 				}
-				results, _ := response["results"].([]any)
-				fmt.Fprintf(s.out, "exa: authenticated; live search returned %d result(s)\n", len(results))
+				count := researchResultCount(response)
+				fmt.Fprintf(s.out, "%s: authenticated; live search returned %d result(s)\n", connection.ID, count)
 				return nil
 			}
 			app, err := s.open()
@@ -245,10 +257,14 @@ func (s *commandState) authConnections() ([]authConnection, error) {
 	if err != nil {
 		return nil, err
 	}
-	available := []authConnection{{
-		ID: "exa", Name: "Exa web research", CredentialEnvironment: "EXA_API_KEY",
-		Authentication: provider.AuthenticationAPIKey,
-	}}
+	available := make([]authConnection, 0, len(research.Connections())+len(registry.Descriptors()))
+	for _, connection := range research.Connections() {
+		available = append(available, authConnection{
+			ID: string(connection.ID), Name: connection.Name + " web research",
+			CredentialEnvironment: connection.CredentialEnvironment,
+			Authentication:        provider.AuthenticationAPIKey,
+		})
+	}
 	for _, descriptor := range registry.Descriptors() {
 		available = append(available, authConnection{
 			ID: descriptor.ID, Name: descriptor.Name,
@@ -257,6 +273,18 @@ func (s *commandState) authConnections() ([]authConnection, error) {
 		})
 	}
 	return available, nil
+}
+
+func researchResultCount(response map[string]any) int {
+	if values, ok := response["results"].([]any); ok {
+		return len(values)
+	}
+	if data, ok := response["data"].(map[string]any); ok {
+		if values, ok := data["results"].([]any); ok {
+			return len(values)
+		}
+	}
+	return 0
 }
 
 func findAuthConnection(available []authConnection, raw string) (authConnection, error) {

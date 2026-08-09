@@ -13,6 +13,7 @@ import (
 	adkfilesystem "github.com/cloudwego/eino/adk/filesystem"
 	filesystemmw "github.com/cloudwego/eino/adk/middlewares/filesystem"
 	"github.com/cloudwego/eino/adk/middlewares/reduction"
+	"github.com/cloudwego/eino/components/tool"
 )
 
 var filesystemTools = []string{
@@ -24,30 +25,17 @@ var filesystemTools = []string{
 	filesystemmw.ToolNameGrep,
 }
 
-func (r *Runtime) filesystemHandler(
+func (r *Runtime) filesystemTools(
 	ctx context.Context,
-	allowed []string,
-) ([]adk.ChatModelAgentMiddleware, error) {
+) ([]tool.BaseTool, string, adk.ChatModelAgentMiddleware, error) {
 	enabled := make(map[string]bool, len(filesystemTools))
-	if allowed == nil {
-		for _, name := range filesystemTools {
-			enabled[name] = true
-		}
-	} else {
-		supported := make(map[string]struct{}, len(filesystemTools))
-		for _, name := range filesystemTools {
-			supported[name] = struct{}{}
-		}
-		for _, name := range allowed {
-			if _, ok := supported[name]; ok {
-				enabled[name] = true
-			}
-		}
+	for _, name := range filesystemTools {
+		enabled[name] = true
 	}
 
 	local, err := localbackend.NewBackend(ctx, &localbackend.Config{})
 	if err != nil {
-		return nil, fmt.Errorf("create Eino local tool backend: %w", err)
+		return nil, "", nil, fmt.Errorf("create Eino local tool backend: %w", err)
 	}
 	backend := &rootedBackend{root: r.root, temp: r.temp, delegate: local}
 	prompt := fmt.Sprintf(
@@ -68,22 +56,23 @@ func (r *Runtime) filesystemHandler(
 	}
 	handler, err := filesystemmw.New(ctx, config)
 	if err != nil {
-		return nil, fmt.Errorf("create Eino filesystem middleware: %w", err)
+		return nil, "", nil, fmt.Errorf("create Eino filesystem middleware: %w", err)
 	}
-	handlers := []adk.ChatModelAgentMiddleware{handler}
-	if enabled[filesystemmw.ToolNameReadFile] {
-		// Eino's reduction middleware preserves a large result in ALT's private
-		// runtime storage and replaces the model-visible result with bounded
-		// head/tail previews plus an opaque read_file path. This is lossless:
-		// read_file's offset/limit contract pages through the complete result.
-		// SkipClear prevents this guard from rewriting historical context.
-		reducer, err := r.toolResultReductionHandler(ctx, backend)
-		if err != nil {
-			return nil, fmt.Errorf("create Eino tool-result reduction middleware: %w", err)
-		}
-		handlers = append(handlers, reducer)
+	seeded := &adk.ChatModelAgentContext{}
+	_, configured, err := handler.BeforeAgent(ctx, seeded)
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("initialize Eino filesystem tools: %w", err)
 	}
-	return handlers, nil
+	// Eino's reduction middleware preserves a large result in ALT's private
+	// runtime storage and replaces the model-visible result with bounded
+	// head/tail previews plus an opaque read_file path. This is lossless:
+	// read_file's offset/limit contract pages through the complete result.
+	// SkipClear prevents this guard from rewriting historical context.
+	reducer, err := r.toolResultReductionHandler(ctx, backend)
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("create Eino tool-result reduction middleware: %w", err)
+	}
+	return configured.Tools, prompt, reducer, nil
 }
 
 func (r *Runtime) toolResultReductionHandler(

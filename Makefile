@@ -75,6 +75,7 @@ licenses:
 			''; \
 		cat references/bubblewrap/COPYING; \
 	} > THIRD_PARTY_NOTICES.md; \
+	sed -i 's/\r$$//' THIRD_PARTY_NOTICES.md; \
 	cp THIRD_PARTY_NOTICES.md internal/licenses/THIRD_PARTY_NOTICES.txt; \
 	cmp THIRD_PARTY_NOTICES.md internal/licenses/THIRD_PARTY_NOTICES.txt
 

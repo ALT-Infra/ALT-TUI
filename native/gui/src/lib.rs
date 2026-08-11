@@ -749,8 +749,8 @@ impl TeamApp {
             self.inspector_open = false;
         }
         egui::Panel::top("team-toolbar").show_inside(root, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading(if self.draft.name.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.strong(if self.draft.name.is_empty() {
                     "Team"
                 } else {
                     &self.draft.name
@@ -795,8 +795,8 @@ impl TeamApp {
                         requested_gateway = Some(selected);
                     }
                 }
-                ui.separator();
                 if self.read_only() {
+                    ui.separator();
                     ui.monospace(format!("{}@{}", self.draft.id, self.draft.base_revision));
                     ui.separator();
                     let edge_label = if self.show_all_edges {
@@ -807,15 +807,8 @@ impl TeamApp {
                     if ui.button(edge_label).clicked() {
                         self.show_all_edges = !self.show_all_edges;
                     }
-                } else {
-                    if ui.button("+ Member").clicked() {
-                        self.add_member();
-                    }
-                    ui.separator();
-                    ui.weak("Draw");
-                    ui.selectable_value(&mut self.connection_kind, ConnectionKind::Call, "Call");
-                    ui.selectable_value(&mut self.connection_kind, ConnectionKind::Peer, "Peer");
                 }
+                ui.separator();
                 runtime_policy_badge(ui, &self.runtime);
                 if ui.button("Auto layout").clicked() {
                     self.layout_frames = 3;
@@ -823,7 +816,19 @@ impl TeamApp {
                 if !self.inspector_open && ui.button("Details").clicked() {
                     self.inspector_open = true;
                 }
-                if !self.read_only() {
+            });
+            if !self.read_only() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Name");
+                    ui.add(egui::TextEdit::singleline(&mut self.draft.name).desired_width(360.0));
+                    ui.separator();
+                    if ui.button("+ Member").clicked() {
+                        self.add_member();
+                    }
+                    ui.separator();
+                    ui.weak("Draw");
+                    ui.selectable_value(&mut self.connection_kind, ConnectionKind::Call, "Call");
+                    ui.selectable_value(&mut self.connection_kind, ConnectionKind::Peer, "Peer");
                     ui.separator();
                     if ui.button("Validate").clicked() {
                         self.validate();
@@ -833,12 +838,6 @@ impl TeamApp {
                     if ui.add(publish).clicked() {
                         self.publish();
                     }
-                }
-            });
-            if !self.read_only() {
-                ui.horizontal(|ui| {
-                    ui.label("Name");
-                    ui.add(egui::TextEdit::singleline(&mut self.draft.name).desired_width(360.0));
                     if !self.status.is_empty() {
                         ui.separator();
                         ui.label(&self.status);
@@ -1279,6 +1278,7 @@ impl TeamApp {
             .zoom_range(pixel_perfect_scene_zoom_range())
             .prevent_node_overlap(!self.read_only())
             .node_clearance(12.0)
+            .marquee_selection(false)
             .selected_nodes(selected_nodes);
         if self.read_only() {
             graph = graph
@@ -1286,11 +1286,14 @@ impl TeamApp {
                     egui::containers::DragPanButtons::PRIMARY
                         | egui::containers::DragPanButtons::MIDDLE,
                 )
-                .marquee_selection(false)
                 .immutable(true)
                 .align(false);
         } else {
-            graph = graph.align(true);
+            // The fork's graph-aware gesture reserves primary drags that begin
+            // on nodes and sockets for editing, and pans only when the gesture
+            // begins on empty canvas. This removes marquee selection without
+            // sacrificing node movement or connection drawing.
+            graph = graph.primary_drag_pan_empty(true).align(true);
         }
         let response = graph.show(&mut view, ui, |ui, show| {
             if self.read_only() {
@@ -3574,12 +3577,13 @@ mod tests {
         rect_ray_anchor, reflow_definition_for_display, rounded_obstacle_safe_route,
         route_between_rects, sample_polyline, segment_rect_entry, tangent_annotation,
         thinking_fingerprint, thinking_node_id, thinking_node_label, thinking_routes,
-        thinking_routing_fingerprint, CallEdge, DraftAssignment, DraftMember, LiveRegistration,
-        ModelChoice, PeerEdge, PortEdge, RuntimeCapabilities, Selection, TeamApp, TeamDraft,
-        TeamView, ThinkingApp, ThinkingEdge, ThinkingNode, ThinkingProjection, ThinkingTurn,
-        ThinkingTurnSummary,
+        thinking_routing_fingerprint, CallEdge, DraftAssignment, DraftMember, GatewayDescriptor,
+        LiveRegistration, ModelChoice, PeerEdge, PortEdge, RuntimeCapabilities, Selection, TeamApp,
+        TeamDraft, TeamView, ThinkingApp, ThinkingEdge, ThinkingNode, ThinkingProjection,
+        ThinkingTurn, ThinkingTurnSummary,
     };
     use egui_graph::NodeId;
+    use egui_kittest::kittest::Queryable;
     use std::collections::{BTreeMap, HashMap};
 
     fn collect_shape_text(shape: &eframe::egui::Shape, output: &mut String) {
@@ -3873,6 +3877,89 @@ mod tests {
         assert_eq!(harness.state().draft.call_edges.len(), 1);
         assert_eq!(harness.state().draft.call_edges[0].lead_id, "lead");
         assert_eq!(harness.state().draft.call_edges[0].member_id, "contributor");
+    }
+
+    #[test]
+    fn editable_team_primary_drag_pans_empty_canvas() {
+        let app = TeamApp::new(
+            0,
+            dense_peer_draft(),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            String::new(),
+            TeamView::Edit,
+            RuntimeCapabilities::default(),
+        );
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(eframe::egui::vec2(1200.0, 820.0))
+            .wgpu()
+            .build_ui_state(|ui, app| app.update(ui), app);
+        harness.run();
+
+        let graph_rect = harness.state().graph_screen_rect;
+        let before = harness.state().view.scene_rect.center();
+        let selection_before = harness.state().selection;
+        let start = graph_rect.right_bottom() - eframe::egui::vec2(30.0, 30.0);
+        let end = start - eframe::egui::vec2(170.0, 75.0);
+        harness.hover_at(start);
+        harness.drag_at(start);
+        harness.step();
+        harness.hover_at(end);
+        harness.step();
+        harness.drop_at(end);
+        harness.run();
+
+        let after = harness.state().view.scene_rect.center();
+        assert!(
+            before.distance(after) > 10.0,
+            "primary drag did not pan the authoring canvas: {before:?} -> {after:?}"
+        );
+        assert_eq!(harness.state().selection, selection_before);
+        assert!(harness.state().edge_in_progress.is_none());
+    }
+
+    #[test]
+    fn editable_team_toolbar_wraps_without_clipping_controls() {
+        let app = TeamApp::new(
+            0,
+            dense_peer_draft(),
+            vec![],
+            vec![GatewayDescriptor {
+                id: "opencode".to_owned(),
+                name: "OpenCode".to_owned(),
+            }],
+            vec![],
+            vec![],
+            String::new(),
+            TeamView::Edit,
+            RuntimeCapabilities::default(),
+        );
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(eframe::egui::vec2(1100.0, 760.0))
+            .wgpu()
+            .build_ui_state(|ui, app| app.update(ui), app);
+        harness.run();
+
+        let mode = harness.get_by_value("Edit Team").rect();
+        let gateway = harness.get_by_value("OpenCode · opencode").rect();
+        assert!(
+            (mode.center().y - gateway.center().y).abs() <= 1.0,
+            "mode and gateway selectors are vertically misaligned: {mode:?} {gateway:?}"
+        );
+        for label in ["+ Member", "Call", "Peer", "Validate", "Publish revision"] {
+            let rect = harness.get_by_label(label).rect();
+            assert!(
+                rect.min.x >= 0.0 && rect.max.x <= 1100.0,
+                "toolbar control {label:?} is horizontally clipped: {rect:?}"
+            );
+            assert!(
+                rect.min.y >= 0.0 && rect.max.y <= harness.state().graph_screen_rect.top(),
+                "toolbar control {label:?} escaped the toolbar: {rect:?}"
+            );
+        }
+        harness.snapshot("editable_team_responsive_toolbar");
     }
 
     #[test]

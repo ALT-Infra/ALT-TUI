@@ -1013,7 +1013,7 @@ dependencies = [
 [[package]]
 name = "egui_graph"
 version = "0.16.2"
-source = "git+https://github.com/ALT-Infra/egui_graph?rev=a4fa7c7#a4fa7c7c82d72b5f7bc3f3a598acc1111b9f043c"
+source = "git+https://github.com/ALT-Infra/egui_graph?rev=dd997e3#dd997e378e12046cea12ad1419189053ecf8fcd8"
 dependencies = [
  "egui",
  "serde",

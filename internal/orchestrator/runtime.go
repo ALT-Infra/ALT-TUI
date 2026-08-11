@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -66,6 +67,13 @@ func (r *sessionRuntime) execute(parent context.Context, recovered bool) error {
 		tooling.RuntimeOptions{
 			DangerouslyBypassApprovalsAndSandbox: r.engineOptions.DangerouslyBypassApprovalsAndSandbox,
 			SensitiveEnvironment:                 r.engineOptions.SensitiveEnvironment,
+			PersistReasoning:                     r.profile.Policy.PersistReasoning,
+			ContextArchiveDirectory:              requestContextArchive(r.engineOptions.ContextArchiveRoot, r.session.ID),
+			SearchContext:                        r.searchContext,
+			BrowseContext:                        r.browseContext,
+			OpenContext:                          r.openContext,
+			ArchiveToolOutput:                    r.archiveToolOutput,
+			RecordAgentCompaction:                r.recordAgentCompaction,
 			ResolveResearchProvider:              r.engineOptions.ResolveResearchProvider,
 			ResolveExaCredential:                 r.engineOptions.ResolveExaCredential,
 			ResolveLinkupCredential:              r.engineOptions.ResolveLinkupCredential,
@@ -164,6 +172,13 @@ func (r *sessionRuntime) execute(parent context.Context, recovered bool) error {
 	return nil
 }
 
+func requestContextArchive(root, sessionID string) string {
+	if strings.TrimSpace(root) == "" {
+		return ""
+	}
+	return filepath.Join(root, "sessions", sessionID)
+}
+
 func (r *sessionRuntime) installLoop(loop *adk.TurnLoop[Signal, *schema.Message]) {
 	r.signalMu.Lock()
 	r.loop = loop
@@ -193,25 +208,40 @@ func (r *sessionRuntime) loadConversationHistory(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("load conversation history: %w", err)
 	}
-	history := make([]ConversationTurn, 0, max(0, len(turns)-1))
+	prior := make([]store.Session, 0, max(0, len(turns)-1))
 	for _, turn := range turns {
 		if turn.ID == r.session.ID {
 			break
+		}
+		prior = append(prior, turn)
+	}
+	detailFrom := max(0, len(prior)-recentConversationLimit)
+	history := make([]ConversationTurn, 0, len(prior))
+	for index, turn := range prior {
+		entry := ConversationTurn{SessionID: turn.ID, Status: string(turn.Status), LeadID: turn.LeadID}
+		if index < detailFrom {
+			history = append(history, entry)
+			continue
 		}
 		items, err := r.store.Events(ctx, turn.ID, 0)
 		if err != nil {
 			return fmt.Errorf("load conversation turn %s provenance: %w", turn.ID, err)
 		}
-		entry := ConversationTurn{
-			Task: turn.Task, Answer: turn.FinalAnswer, Status: string(turn.Status),
-			LeadID: turn.LeadID,
-		}
+		entry.Task = turn.Task
+		entry.Answer = turn.FinalAnswer
 		for _, item := range items {
+			switch item.Kind {
+			case event.SessionCreated:
+				entry.TaskReference = store.ContextReferenceForEvent(item)
+			case event.FinalCompleted:
+				entry.AnswerReference = store.ContextReferenceForEvent(item)
+			}
 			if !sharedConversationEvent(item.Kind) {
 				continue
 			}
 			entry.ObservableTrace = append(entry.ObservableTrace, ConversationTrace{
-				Sequence: item.Sequence, Kind: item.Kind, Actor: item.Actor,
+				Reference: store.ContextReferenceForEvent(item),
+				Sequence:  item.Sequence, Kind: item.Kind, Actor: item.Actor,
 				CorrelationID: item.CorrelationID,
 				Data:          append([]byte(nil), item.Data...),
 			})
@@ -258,6 +288,13 @@ func (r *sessionRuntime) route(ctx context.Context) error {
 		return err
 	}
 	system, user := routerMessages(r.profile, r.session.Task, r.conversationHistory)
+	sourceThrough, err := r.store.LastSequence(ctx, r.session.ID)
+	if err != nil {
+		return err
+	}
+	if _, err := r.commitWorkingView(ctx, "router", "router", sourceThrough, user); err != nil {
+		return err
+	}
 	decision, err := generateStructured[RouterDecision](
 		ctx, r.session.ID, r.store, r.providers, r.profile,
 		r.profile.Router.Model, "router", system, user,
@@ -354,6 +391,9 @@ func (r *sessionRuntime) decideLead(ctx context.Context, signals []Signal) (Lead
 		return LeadDecision{}, err
 	}
 	system, user := leadMessages(r.profile, lead, state, signals)
+	if _, err := r.commitWorkingView(ctx, "lead", lead.ID, state.LastSequence, user); err != nil {
+		return LeadDecision{}, err
+	}
 	decision, err := r.generateLeadDecisionWithTools(ctx, lead, turn, system, user, state.WorkCount() == 0, func(decision LeadDecision) error {
 		if strings.TrimSpace(decision.Assessment) == "" {
 			return fmt.Errorf("assessment is empty")
@@ -765,7 +805,10 @@ func (r *sessionRuntime) generateFinal(ctx context.Context, lead profile.LeadAss
 	}
 	chat = r.observeModel(lead.Model, "final:"+lead.ID)(chat)
 	system, user := finalMessages(r.profile, lead, state, brief)
-	handlers, err := r.tools.Handlers(ctx, "final:"+lead.ID)
+	if _, err := r.commitWorkingView(ctx, "final", lead.ID, state.LastSequence, user); err != nil {
+		return err
+	}
+	handlers, err := r.tools.HandlersWithCompaction(ctx, "final:"+lead.ID, chat)
 	if err != nil {
 		return err
 	}

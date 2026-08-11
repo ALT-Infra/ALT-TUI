@@ -1027,6 +1027,18 @@ func (m *Model) applyEvent(item event.Event) {
 	case event.ModelUsage:
 		data, _ := event.Decode[event.ModelUsageData](item)
 		current.tokens += data.TotalTokens
+	case event.ContextViewCommitted:
+		data, _ := event.Decode[event.ContextViewCommittedData](item)
+		if data.Compacted {
+			current.compactions++
+		}
+	case event.ContextAgentCompacted:
+		data, _ := event.Decode[event.ContextAgentCompactedData](item)
+		current.compactions++
+		current.timeline = append(current.timeline, fmt.Sprintf(
+			"Context compacted for %s · %d → %d messages · exact transcript retained",
+			data.Scope, data.MessagesBefore, data.MessagesAfter,
+		))
 	case event.SessionFailed:
 		data, _ := event.Decode[event.FailureData](item)
 		current.status = store.SessionFailed

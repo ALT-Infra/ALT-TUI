@@ -35,6 +35,9 @@ func (s *Store) Append(ctx context.Context, sessionID string, draft event.Draft)
 	if err := insertEvent(ctx, tx, item); err != nil {
 		return event.Event{}, err
 	}
+	if err := insertContextRecord(ctx, tx, item); err != nil {
+		return event.Event{}, err
+	}
 	if err := applySessionProjection(ctx, tx, item); err != nil {
 		return event.Event{}, err
 	}

@@ -7,17 +7,21 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/middlewares/dynamictool/toolsearch"
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	toolutils "github.com/cloudwego/eino/components/tool/utils"
 )
 
 const (
-	ToolNameExecCommand = "exec_command"
-	ToolNameWriteStdin  = "write_stdin"
-	ToolNameApplyPatch  = "apply_patch"
-	ToolNameWebSearch   = "web_search"
-	ToolNameWebFetch    = "web_fetch"
-	ToolNameWebAnswer   = "web_answer"
+	ToolNameExecCommand   = "exec_command"
+	ToolNameWriteStdin    = "write_stdin"
+	ToolNameApplyPatch    = "apply_patch"
+	ToolNameWebSearch     = "web_search"
+	ToolNameWebFetch      = "web_fetch"
+	ToolNameWebAnswer     = "web_answer"
+	ToolNameContextSearch = "context_search"
+	ToolNameContextBrowse = "context_browse"
+	ToolNameContextOpen   = "context_open"
 )
 
 var allRuntimeTools = append(
@@ -28,7 +32,65 @@ var allRuntimeTools = append(
 	ToolNameWebSearch,
 	ToolNameWebFetch,
 	ToolNameWebAnswer,
+	ToolNameContextSearch,
+	ToolNameContextBrowse,
+	ToolNameContextOpen,
 )
+
+type ContextSearchInput struct {
+	Query string `json:"query" jsonschema:"description=Terms to find in exact durable evidence available to this assignment."`
+	Limit int    `json:"limit,omitempty" jsonschema:"description=Maximum matches to return; defaults to 8 and cannot exceed 25."`
+}
+
+type ContextSearchMatch struct {
+	Reference      string `json:"reference"`
+	SessionID      string `json:"session_id,omitempty"`
+	SourceSequence int64  `json:"source_sequence"`
+	Kind           string `json:"kind"`
+	Actor          string `json:"actor,omitempty"`
+	CorrelationID  string `json:"correlation_id,omitempty"`
+	Preview        string `json:"preview"`
+}
+
+type ContextSearchResult struct {
+	Matches []ContextSearchMatch `json:"matches"`
+}
+
+type ContextBrowseInput struct {
+	Cursor string `json:"cursor,omitempty" jsonschema:"description=Opaque next_cursor returned by the previous context_browse call; omit for newest evidence."`
+	Limit  int    `json:"limit,omitempty" jsonschema:"description=Maximum records to return; defaults to 20 and cannot exceed 50."`
+}
+
+type ContextBrowseResult struct {
+	Records    []ContextSearchMatch `json:"records"`
+	NextCursor string               `json:"next_cursor,omitempty"`
+}
+
+type ContextOpenInput struct {
+	Reference  string `json:"reference" jsonschema:"description=An exact alt://context/records/... or alt-tool-output://... reference returned by ALT."`
+	ByteOffset int    `json:"byte_offset,omitempty" jsonschema:"description=Zero-based byte offset from which to read; use next_byte_offset to continue an earlier response."`
+	MaxBytes   int    `json:"max_bytes,omitempty" jsonschema:"description=Maximum exact bytes to return; defaults to 16000 and cannot exceed 64000."`
+}
+
+type ContextOpenResult struct {
+	Reference      string `json:"reference"`
+	SessionID      string `json:"session_id,omitempty"`
+	SourceSequence int64  `json:"source_sequence"`
+	OccurredAt     string `json:"occurred_at,omitempty"`
+	Kind           string `json:"kind"`
+	Actor          string `json:"actor,omitempty"`
+	CorrelationID  string `json:"correlation_id,omitempty"`
+	CausationID    string `json:"causation_id,omitempty"`
+	Digest         string `json:"sha256"`
+	ChunkDigest    string `json:"chunk_sha256"`
+	ByteCount      int    `json:"byte_count"`
+	ByteStart      int    `json:"byte_start"`
+	ByteEnd        int    `json:"byte_end_exclusive"`
+	HasMore        bool   `json:"has_more"`
+	NextByteOffset int    `json:"next_byte_offset,omitempty"`
+	Encoding       string `json:"encoding"`
+	Content        string `json:"content"`
+}
 
 func ToolNames() []string {
 	return append([]string(nil), allRuntimeTools...)
@@ -40,6 +102,25 @@ func ToolNames() []string {
 func (r *Runtime) Handlers(
 	ctx context.Context,
 	owner string,
+) ([]adk.ChatModelAgentMiddleware, error) {
+	return r.handlers(ctx, owner, nil)
+}
+
+// HandlersWithCompaction adds Eino's intra-agent summarization after ALT's
+// exact tool-result reduction. Before any summary replaces working messages,
+// ALT archives the exact permitted transcript and attaches its address.
+func (r *Runtime) HandlersWithCompaction(
+	ctx context.Context,
+	owner string,
+	summarizer model.BaseChatModel,
+) ([]adk.ChatModelAgentMiddleware, error) {
+	return r.handlers(ctx, owner, summarizer)
+}
+
+func (r *Runtime) handlers(
+	ctx context.Context,
+	owner string,
+	summarizer model.BaseChatModel,
 ) ([]adk.ChatModelAgentMiddleware, error) {
 	if r == nil {
 		return nil, fmt.Errorf("tool runtime is required")
@@ -53,7 +134,7 @@ func (r *Runtime) Handlers(
 		enabled[name] = true
 	}
 
-	filesystemTools, filesystemInstruction, reducer, err := r.filesystemTools(ctx)
+	filesystemTools, filesystemInstruction, reducer, err := r.filesystemTools(ctx, owner)
 	if err != nil {
 		return nil, err
 	}
@@ -74,6 +155,13 @@ func (r *Runtime) Handlers(
 		},
 		dynamic,
 		reducer,
+	}
+	compactor, err := r.contextCompactionHandler(ctx, owner, summarizer)
+	if err != nil {
+		return nil, fmt.Errorf("create Eino context compaction: %w", err)
+	}
+	if compactor != nil {
+		handlers = append(handlers, compactor)
 	}
 	if len(nativeTools) > 0 {
 		executionPolicy := "exec_command runs inside ALT's fail-closed Linux sandbox: Bubblewrap isolates filesystem mounts, processes, IPC, UTS, and direct networking; no_new_privs and Landlock restrict privilege transitions and writes. It may read the host filesystem, but may write only the session workspace and ALT's private temporary directory."
@@ -122,6 +210,75 @@ func (r *Runtime) nativeTools(ctx context.Context, owner string, enabled map[str
 			ToolNameApplyPatch,
 			"Apply a strict Git or standard unified text patch transactionally inside the session workspace. The complete patch must contain file headers and hunks.",
 			applier.apply,
+		)
+		if err != nil {
+			return nil, err
+		}
+		tools = append(tools, value)
+	}
+	if enabled[ToolNameContextSearch] {
+		value, err := toolutils.InferTool(
+			ToolNameContextSearch,
+			"Search ALT's exact durable context archive within this assignment's authority. Use it when a bounded working view points to older evidence or a prior detail becomes relevant.",
+			func(ctx context.Context, input ContextSearchInput) (ContextSearchResult, error) {
+				if r.options.SearchContext == nil {
+					return ContextSearchResult{}, fmt.Errorf("durable context search is unavailable")
+				}
+				if input.Limit == 0 {
+					input.Limit = 8
+				}
+				if input.Limit < 1 || input.Limit > 25 {
+					return ContextSearchResult{}, fmt.Errorf("context search limit must be within [1,25]")
+				}
+				return r.options.SearchContext(ctx, owner, input)
+			},
+		)
+		if err != nil {
+			return nil, err
+		}
+		tools = append(tools, value)
+	}
+	if enabled[ToolNameContextBrowse] {
+		value, err := toolutils.InferTool(
+			ToolNameContextBrowse,
+			"Browse the newest durable context occurrences available to this assignment without guessing search terms. Follow next_cursor to move backward, then use context_open for exact bytes.",
+			func(ctx context.Context, input ContextBrowseInput) (ContextBrowseResult, error) {
+				if r.options.BrowseContext == nil {
+					return ContextBrowseResult{}, fmt.Errorf("durable context browsing is unavailable")
+				}
+				if input.Limit == 0 {
+					input.Limit = 20
+				}
+				if input.Limit < 1 || input.Limit > 50 {
+					return ContextBrowseResult{}, fmt.Errorf("context browse limit must be within [1,50]")
+				}
+				return r.options.BrowseContext(ctx, owner, input)
+			},
+		)
+		if err != nil {
+			return nil, err
+		}
+		tools = append(tools, value)
+	}
+	if enabled[ToolNameContextOpen] {
+		value, err := toolutils.InferTool(
+			ToolNameContextOpen,
+			"Read a bounded exact byte range from one immutable ALT context occurrence. Continue with next_byte_offset when has_more is true; sha256 identifies the whole occurrence and chunk_sha256 verifies the returned range.",
+			func(ctx context.Context, input ContextOpenInput) (ContextOpenResult, error) {
+				if r.options.OpenContext == nil {
+					return ContextOpenResult{}, fmt.Errorf("durable context recall is unavailable")
+				}
+				if input.ByteOffset < 0 {
+					return ContextOpenResult{}, fmt.Errorf("context open byte_offset cannot be negative")
+				}
+				if input.MaxBytes == 0 {
+					input.MaxBytes = 16_000
+				}
+				if input.MaxBytes < 1 || input.MaxBytes > 64_000 {
+					return ContextOpenResult{}, fmt.Errorf("context open max_bytes must be within [1,64000]")
+				}
+				return r.options.OpenContext(ctx, owner, input)
+			},
 		)
 		if err != nil {
 			return nil, err

@@ -11,39 +11,41 @@ import (
 type Kind string
 
 const (
-	SessionCreated      Kind = "session.created"
-	UserInstruction     Kind = "user.instruction"
-	ProfilePinned       Kind = "profile.pinned"
-	SessionRecovered    Kind = "session.recovered"
-	ModelCallStarted    Kind = "model.call.started"
-	ModelUsage          Kind = "model.usage"
-	RouterStarted       Kind = "router.started"
-	LeadSelected        Kind = "lead.selected"
-	LeadTurnStarted     Kind = "lead.turn.started"
-	LeadTurnCompleted   Kind = "lead.turn.completed"
-	LeadDecision        Kind = "lead.decision"
-	DelegationCreated   Kind = "delegation.created"
-	DelegationStarted   Kind = "delegation.started"
-	ToolCalled          Kind = "tool.called"
-	ToolCompleted       Kind = "tool.completed"
-	DelegationTextDelta Kind = "delegation.text.delta"
-	DelegationReasoning Kind = "delegation.reasoning.delta"
-	DelegationCompleted Kind = "delegation.completed"
-	DelegationFailed    Kind = "delegation.failed"
-	DelegationCancelled Kind = "delegation.cancelled"
-	PeerTurnCreated     Kind = "peer.turn.created"
-	PeerTurnStarted     Kind = "peer.turn.started"
-	PeerTextDelta       Kind = "peer.text.delta"
-	PeerReasoning       Kind = "peer.reasoning.delta"
-	PeerTurnCompleted   Kind = "peer.turn.completed"
-	PeerTurnFailed      Kind = "peer.turn.failed"
-	PeerTurnCancelled   Kind = "peer.turn.cancelled"
-	FinalStarted        Kind = "final.started"
-	FinalTextDelta      Kind = "final.text.delta"
-	FinalReasoning      Kind = "final.reasoning.delta"
-	FinalCompleted      Kind = "final.completed"
-	SessionFailed       Kind = "session.failed"
-	SessionCancelled    Kind = "session.cancelled"
+	SessionCreated        Kind = "session.created"
+	UserInstruction       Kind = "user.instruction"
+	ProfilePinned         Kind = "profile.pinned"
+	SessionRecovered      Kind = "session.recovered"
+	ModelCallStarted      Kind = "model.call.started"
+	ModelUsage            Kind = "model.usage"
+	ContextViewCommitted  Kind = "context.view.committed"
+	ContextAgentCompacted Kind = "context.agent.compacted"
+	RouterStarted         Kind = "router.started"
+	LeadSelected          Kind = "lead.selected"
+	LeadTurnStarted       Kind = "lead.turn.started"
+	LeadTurnCompleted     Kind = "lead.turn.completed"
+	LeadDecision          Kind = "lead.decision"
+	DelegationCreated     Kind = "delegation.created"
+	DelegationStarted     Kind = "delegation.started"
+	ToolCalled            Kind = "tool.called"
+	ToolCompleted         Kind = "tool.completed"
+	DelegationTextDelta   Kind = "delegation.text.delta"
+	DelegationReasoning   Kind = "delegation.reasoning.delta"
+	DelegationCompleted   Kind = "delegation.completed"
+	DelegationFailed      Kind = "delegation.failed"
+	DelegationCancelled   Kind = "delegation.cancelled"
+	PeerTurnCreated       Kind = "peer.turn.created"
+	PeerTurnStarted       Kind = "peer.turn.started"
+	PeerTextDelta         Kind = "peer.text.delta"
+	PeerReasoning         Kind = "peer.reasoning.delta"
+	PeerTurnCompleted     Kind = "peer.turn.completed"
+	PeerTurnFailed        Kind = "peer.turn.failed"
+	PeerTurnCancelled     Kind = "peer.turn.cancelled"
+	FinalStarted          Kind = "final.started"
+	FinalTextDelta        Kind = "final.text.delta"
+	FinalReasoning        Kind = "final.reasoning.delta"
+	FinalCompleted        Kind = "final.completed"
+	SessionFailed         Kind = "session.failed"
+	SessionCancelled      Kind = "session.cancelled"
 )
 
 type Event struct {
@@ -254,4 +256,21 @@ type ModelUsageData struct {
 type ModelCallStartedData struct {
 	Model   string `json:"model"`
 	Purpose string `json:"purpose"`
+}
+
+type ContextViewCommittedData struct {
+	ScopeKind             string `json:"scope_kind"`
+	ScopeID               string `json:"scope_id"`
+	Epoch                 int    `json:"epoch"`
+	SourceThroughSequence int64  `json:"source_through_sequence"`
+	ViewDigest            string `json:"view_digest"`
+	EstimatedTokens       int    `json:"estimated_tokens"`
+	Compacted             bool   `json:"compacted"`
+}
+
+type ContextAgentCompactedData struct {
+	Scope               string `json:"scope"`
+	TranscriptReference string `json:"transcript_reference"`
+	MessagesBefore      int    `json:"messages_before"`
+	MessagesAfter       int    `json:"messages_after"`
 }

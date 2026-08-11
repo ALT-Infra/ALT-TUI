@@ -95,7 +95,7 @@ func OpenAtWithOptions(ctx context.Context, dataDir string, options Options) (*A
 	for _, connection := range research.Connections() {
 		_, _, lookupErr := credentials.Lookup(string(connection.ID), connection.CredentialEnvironment)
 		configured := lookupErr == nil
-		if lookupErr != nil && !errors.Is(lookupErr, credential.ErrNotFound) {
+		if lookupErr != nil && !credentialUnavailable(lookupErr) {
 			ledger.Close()
 			return nil, fmt.Errorf("inspect %s credential: %w", connection.Name, lookupErr)
 		}
@@ -119,6 +119,7 @@ func OpenAtWithOptions(ctx context.Context, dataDir string, options Options) (*A
 			orchestrator.EngineOptions{
 				DangerouslyBypassApprovalsAndSandbox: options.DangerouslyBypassApprovalsAndSandbox,
 				SensitiveEnvironment:                 sensitiveEnvironment,
+				ContextArchiveRoot:                   filepath.Join(dataDir, "context"),
 				ResolveResearchProvider:              func(callCtx context.Context) (string, error) { return app.ResolveResearchProvider(callCtx) },
 				ResolveExaCredential:                 func() (string, error) { return credentials.Resolve("exa", "EXA_API_KEY") },
 				ResolveLinkupCredential:              func() (string, error) { return credentials.Resolve("linkup", "LINKUP_API_KEY") },
@@ -140,7 +141,7 @@ func (a *Application) ResearchConnections(ctx context.Context) ([]ResearchConnec
 	for _, connection := range research.Connections() {
 		_, _, err := a.credentials.Lookup(string(connection.ID), connection.CredentialEnvironment)
 		configured := err == nil
-		if err != nil && !errors.Is(err, credential.ErrNotFound) {
+		if err != nil && !credentialUnavailable(err) {
 			return nil, fmt.Errorf("inspect %s credential: %w", connection.Name, err)
 		}
 		result = append(result, ResearchConnectionStatus{
@@ -193,7 +194,7 @@ func (a *Application) resolveResearchProvider(ctx context.Context, require bool)
 			configured = append(configured, connection.ID)
 			continue
 		}
-		if !errors.Is(lookupErr, credential.ErrNotFound) {
+		if !credentialUnavailable(lookupErr) {
 			return "", fmt.Errorf("inspect %s credential: %w", connection.Name, lookupErr)
 		}
 	}
@@ -220,6 +221,10 @@ func (a *Application) resolveResearchProvider(ctx context.Context, require bool)
 		return "", fmt.Errorf("web research is not configured; run `alt auth set exa` or `alt auth set linkup`")
 	}
 	return "", fmt.Errorf("choose the active research provider with /research")
+}
+
+func credentialUnavailable(err error) bool {
+	return errors.Is(err, credential.ErrNotFound) || errors.Is(err, credential.ErrInvalid)
 }
 
 // NewGatewayRegistry is the single integration composition point. Adding a

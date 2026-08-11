@@ -7,11 +7,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
 
 const toolOutputPathPrefix = "alt-tool-output://"
+
+func IsToolOutputReference(reference string) bool {
+	return strings.HasPrefix(strings.TrimSpace(reference), toolOutputPathPrefix)
+}
 
 // Runtime owns the model-callable terminal state for one orchestration run.
 // Process sessions intentionally survive individual model calls, but are
@@ -19,6 +24,7 @@ const toolOutputPathPrefix = "alt-tool-output://"
 type Runtime struct {
 	root       string
 	temp       string
+	archive    string
 	ctx        context.Context
 	cancel     context.CancelFunc
 	executable string
@@ -32,9 +38,19 @@ type Runtime struct {
 type RuntimeOptions struct {
 	DangerouslyBypassApprovalsAndSandbox bool
 	SensitiveEnvironment                 []string
-	ResolveResearchProvider              func(context.Context) (string, error)
-	ResolveExaCredential                 func() (string, error)
-	ResolveLinkupCredential              func() (string, error)
+	PersistReasoning                     bool
+	// ContextArchiveDirectory is durable, private storage for exact tool
+	// results removed from the model-visible working context. The orchestrator
+	// scopes it to one persisted ALT request. Runtime.Close never removes it.
+	ContextArchiveDirectory string
+	SearchContext           func(context.Context, string, ContextSearchInput) (ContextSearchResult, error)
+	BrowseContext           func(context.Context, string, ContextBrowseInput) (ContextBrowseResult, error)
+	OpenContext             func(context.Context, string, ContextOpenInput) (ContextOpenResult, error)
+	ArchiveToolOutput       func(context.Context, string, string, []byte) error
+	RecordAgentCompaction   func(context.Context, string, string, int, int) error
+	ResolveResearchProvider func(context.Context) (string, error)
+	ResolveExaCredential    func() (string, error)
+	ResolveLinkupCredential func() (string, error)
 }
 
 func NewRuntime(parent context.Context, workspace string) (*Runtime, error) {
@@ -69,6 +85,25 @@ func NewRuntimeWithOptions(
 		os.RemoveAll(temp)
 		return nil, fmt.Errorf("protect private tool runtime directory: %w", err)
 	}
+	archive := strings.TrimSpace(options.ContextArchiveDirectory)
+	if archive == "" {
+		// Direct Runtime users and unit tests retain the historical ephemeral
+		// behavior. Production orchestration always supplies a durable path.
+		archive = filepath.Join(temp, "context-archive")
+	}
+	archive, err = filepath.Abs(archive)
+	if err != nil {
+		os.RemoveAll(temp)
+		return nil, fmt.Errorf("resolve context archive directory: %w", err)
+	}
+	if err := os.MkdirAll(archive, 0o700); err != nil {
+		os.RemoveAll(temp)
+		return nil, fmt.Errorf("create context archive directory: %w", err)
+	}
+	if err := os.Chmod(archive, 0o700); err != nil {
+		os.RemoveAll(temp)
+		return nil, fmt.Errorf("protect context archive directory: %w", err)
+	}
 	ctx, cancel := context.WithCancel(parent)
 	executable, err := os.Executable()
 	if err != nil {
@@ -77,7 +112,7 @@ func NewRuntimeWithOptions(
 		return nil, fmt.Errorf("locate ALT executable: %w", err)
 	}
 	runtime := &Runtime{
-		root: root, temp: temp, ctx: ctx, cancel: cancel,
+		root: root, temp: temp, archive: archive, ctx: ctx, cancel: cancel,
 		executable: executable, options: options,
 	}
 	runtime.processes = newProcessManager(runtime)
@@ -104,12 +139,16 @@ func (r *Runtime) Root() string {
 }
 
 // toolOutputPath returns an opaque read_file path for a result stored in the
-// runtime's private directory. Hashing keeps provider-generated call IDs out
-// of filesystem paths; the sequence prevents collisions when a gateway omits
-// a call ID. rootedBackend resolves the virtual namespace without creating
-// artifacts in the user's workspace.
+// request's exact context archive. Hashing keeps provider-generated call IDs
+// out of filesystem paths; the sequence prevents collisions when a gateway
+// omits a call ID. rootedBackend resolves the virtual namespace without
+// creating artifacts in the user's workspace.
 func (r *Runtime) toolOutputPath(toolName, callID string) string {
-	identity := toolName + "\x00" + callID
+	return r.toolOutputPathFor("", toolName, callID)
+}
+
+func (r *Runtime) toolOutputPathFor(owner, toolName, callID string) string {
+	identity := owner + "\x00" + toolName + "\x00" + callID
 	if callID == "" {
 		identity += fmt.Sprintf("\x00%d", r.outputSeq.Add(1))
 	}

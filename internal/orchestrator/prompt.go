@@ -46,7 +46,7 @@ The basis should explain the choice without private chain-of-thought.`
 	}
 	user := "CURRENT USER TASK:\n" + task
 	if len(history) > 0 {
-		encoded, _ := json.MarshalIndent(conversationHistory(history), "", "  ")
+		encoded, _ := json.MarshalIndent(boundedConversationHistory(history), "", "  ")
 		user += "\n\nPRIOR CONVERSATION CONTEXT:\n" + string(encoded)
 	}
 	user += "\n\nELIGIBLE LEAD-PLUS-TEAM ASSIGNMENTS:\n" + candidates.String()
@@ -108,6 +108,11 @@ that collaboration and no history from unrelated collaborations or sessions.
 Plan at most one new turn for a given collaboration at once, then reconsider
 after its result. A peer cannot route, become the Lead, or answer the user.
 
+Current-turn tool observations are delivered in the state below. Do not repeat
+a completed immutable call merely to rediscover the same result. Recheck only
+when the underlying state could have changed or the delivered evidence is
+insufficient; use its exact reference before rerunning an expensive operation.
+
 The session state is cumulative: user_task is the same original request on
 every Lead turn, not a fresh request. A completed delegation remains completed
 evidence for that request. Do not repeat its objective unless its recorded
@@ -120,71 +125,29 @@ objective.`
 		ID         string `json:"id"`
 		Definition string `json:"definition"`
 	}
-	type delegationView struct {
-		ID        string           `json:"id"`
-		MemberID  string           `json:"member_id"`
-		Objective string           `json:"objective"`
-		DependsOn []string         `json:"depends_on,omitempty"`
-		Status    DelegationStatus `json:"status"`
-		Result    string           `json:"result,omitempty"`
-		Findings  []string         `json:"findings,omitempty"`
-		Risks     []string         `json:"risks,omitempty"`
-		Error     string           `json:"error,omitempty"`
-	}
-	type peerTurnView struct {
-		ID              string           `json:"id"`
-		CollaborationID string           `json:"collaboration_id"`
-		PeerID          string           `json:"peer_id"`
-		Round           int              `json:"round"`
-		Objective       string           `json:"objective"`
-		Status          DelegationStatus `json:"status"`
-		Result          string           `json:"result,omitempty"`
-		Findings        []string         `json:"findings,omitempty"`
-		Risks           []string         `json:"risks,omitempty"`
-		Error           string           `json:"error,omitempty"`
-	}
 	var members []memberView
 	for _, member := range p.CallableMembersFor(lead) {
 		members = append(members, memberView{
 			ID: member.ID, Definition: p.MemberDefinition(member),
 		})
 	}
-	var delegations []delegationView
-	for _, delegation := range state.SortedDelegations() {
-		delegations = append(delegations, delegationView{
-			ID:        delegation.Spec.ID,
-			MemberID:  delegation.Spec.MemberID,
-			Objective: delegation.Spec.Objective,
-			DependsOn: delegation.Spec.DependsOn,
-			Status:    delegation.Status,
-			Result:    delegation.Result,
-			Findings:  delegation.Findings,
-			Risks:     delegation.Risks,
-			Error:     delegation.Error,
-		})
-	}
 	var peers []memberView
 	for _, peer := range p.PeerMembersFor(lead) {
 		peers = append(peers, memberView{ID: peer.ID, Definition: p.MemberDefinition(peer)})
 	}
-	var peerTurns []peerTurnView
-	for _, turn := range state.SortedPeerTurns() {
-		peerTurns = append(peerTurns, peerTurnView{
-			ID: turn.Spec.ID, CollaborationID: turn.Spec.CollaborationID,
-			PeerID: turn.Spec.PeerID, Round: turn.Spec.Round,
-			Objective: turn.Spec.Objective, Status: turn.Status,
-			Result: turn.Result, Findings: turn.Findings, Risks: turn.Risks, Error: turn.Error,
-		})
-	}
+	delegations, peerTurns, archivedEvidence := leadEvidenceViews(state, signals)
 	payload := map[string]any{
 		"user_task":               state.Task,
-		"conversation_history":    conversationHistory(state.ConversationHistory),
-		"user_instructions":       state.UserInstructions,
+		"user_task_reference":     state.TaskReference,
+		"conversation_history":    boundedConversationHistory(state.ConversationHistory),
+		"user_instructions":       boundedUserInstructions(state.UserInstructions, state.UserInstructionReferences, state.UserInstructionsArchived),
 		"permitted_members":       members,
 		"permitted_peers":         peers,
 		"inherited_runtime_tools": tooling.Supported(),
 		"delegations":             delegations,
 		"peer_turns":              peerTurns,
+		"current_tool_evidence":   boundedObservableTrace(state.ObservableTrace, state.ObservableTraceArchived),
+		"archived_evidence":       archivedEvidence,
 		"new_signals":             signals,
 		"lead_turn":               state.LeadTurns + 1,
 	}
@@ -214,15 +177,19 @@ Return only JSON:
 		Risks     []string `json:"risks,omitempty"`
 	}
 	var prior []priorRound
-	for _, earlier := range history {
+	start := max(0, len(history)-recentPeerTurnLimit)
+	for _, earlier := range history[start:] {
 		if earlier.Spec.ID == turn.Spec.ID || earlier.Status != DelegationCompleted {
 			continue
 		}
-		prior = append(prior, priorRound{Round: earlier.Spec.Round, Objective: earlier.Spec.Objective, Result: earlier.Result, Findings: earlier.Findings, Risks: earlier.Risks})
+		result, _ := compactReferencedText(earlier.Result, earlier.ResultReference, resultVisibleLimit)
+		prior = append(prior, priorRound{Round: earlier.Spec.Round, Objective: compactPlainText(earlier.Spec.Objective, 4_000), Result: result, Findings: compactStringList(earlier.Findings, 6_000), Risks: compactStringList(earlier.Risks, 4_000)})
 	}
 	payload, _ := json.MarshalIndent(map[string]any{
 		"collaboration_id": turn.Spec.CollaborationID,
 		"prior_rounds":     prior,
+		"archived_rounds":  start,
+		"archive_recall":   "Use context_browse, context_search, and context_open for earlier rounds; access remains limited to this collaboration.",
 		"current_round":    turn.Spec.Round,
 		"objective":        turn.Spec.Objective,
 		"context":          turn.Spec.Context,
@@ -263,53 +230,26 @@ evidence, resolve conflicts where possible, and be candid about uncertainty.
 Do not mention orchestration mechanics unless they matter to the answer, and do
 not expose private chain-of-thought. A tool call which returned an expected
 error still failed; describe it as an expected failure, never as a successful
-call. Distinguish the state observed at a particular point from current state
+call. Current-turn tool observations are delivered below. Do not repeat a
+completed immutable call merely to rediscover the same result; recheck only
+when the state could have changed or the delivered evidence is insufficient.
+Distinguish the state observed at a particular point from current state
 when later actions could have changed it. Return only the answer, not JSON.
 
 The user defined the responsible Lead assignment in the following words:
 ` + p.LeadDefinition(lead)
 
-	type resultView struct {
-		Member    string   `json:"member"`
-		Objective string   `json:"objective"`
-		Result    string   `json:"result"`
-		Findings  []string `json:"findings,omitempty"`
-		Risks     []string `json:"risks,omitempty"`
-	}
-	var results []resultView
-	for _, delegation := range state.SortedDelegations() {
-		if delegation.Status == DelegationCompleted {
-			results = append(results, resultView{
-				Member:    delegation.Spec.MemberID,
-				Objective: delegation.Spec.Objective,
-				Result:    delegation.Result,
-				Findings:  delegation.Findings,
-				Risks:     delegation.Risks,
-			})
-		}
-	}
-	for _, turn := range state.SortedPeerTurns() {
-		if turn.Status == DelegationCompleted {
-			results = append(results, resultView{
-				Member:    turn.Spec.PeerID,
-				Objective: fmt.Sprintf("peer collaboration %s round %d: %s", turn.Spec.CollaborationID, turn.Spec.Round, turn.Spec.Objective),
-				Result:    turn.Result, Findings: turn.Findings, Risks: turn.Risks,
-			})
-		}
-	}
+	delegations, peerTurns, archivedEvidence := leadEvidenceViews(state, nil)
 	payload, _ := json.MarshalIndent(map[string]any{
-		"user_task":            state.Task,
-		"conversation_history": conversationHistory(state.ConversationHistory),
-		"user_instructions":    state.UserInstructions,
-		"final_brief":          brief,
-		"evidence":             results,
+		"user_task":             state.Task,
+		"user_task_reference":   state.TaskReference,
+		"conversation_history":  boundedConversationHistory(state.ConversationHistory),
+		"user_instructions":     boundedUserInstructions(state.UserInstructions, state.UserInstructionReferences, state.UserInstructionsArchived),
+		"final_brief":           brief,
+		"delegation_evidence":   delegations,
+		"peer_evidence":         peerTurns,
+		"current_tool_evidence": boundedObservableTrace(state.ObservableTrace, state.ObservableTraceArchived),
+		"archived_evidence":     archivedEvidence,
 	}, "", "  ")
 	return system, string(payload)
-}
-
-func conversationHistory(history []ConversationTurn) []ConversationTurn {
-	if len(history) == 0 {
-		return nil
-	}
-	return append([]ConversationTurn(nil), history...)
 }

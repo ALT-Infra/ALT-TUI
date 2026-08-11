@@ -235,6 +235,65 @@ func TestStatusRendersCodexStyleTranscriptCardWithALTFields(t *testing.T) {
 	}
 }
 
+func TestContextLifecycleIsVisibleWithoutExposingArchivedTranscript(t *testing.T) {
+	model, closeApp := testModel(t)
+	defer closeApp()
+	model.sessionID = "conversation-context"
+	model.conversationID = "conversation-context"
+	model.turns = []turnView{{
+		sessionID: "turn-context", status: store.SessionRunning,
+	}}
+	model.currentTurn = 0
+
+	view, err := (event.Draft{
+		Kind: event.ContextViewCommitted,
+		Data: event.ContextViewCommittedData{
+			ScopeKind: "lead", ScopeID: "engineering", Epoch: 3,
+			EstimatedTokens: 12000, ViewDigest: "view-digest", Compacted: true,
+		},
+	}).Materialize("turn-context", 1, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.applyEvent(view)
+
+	agent, err := (event.Draft{
+		Kind: event.ContextAgentCompacted, CorrelationID: "engineering",
+		Data: event.ContextAgentCompactedData{
+			Scope: "lead:engineering", TranscriptReference: "alt-tool-output://private",
+			MessagesBefore: 91, MessagesAfter: 7,
+		},
+	}).Materialize("turn-context", 2, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.applyEvent(agent)
+
+	current := model.current()
+	if current.compactions != 2 {
+		t.Fatalf("compactions = %d, want 2", current.compactions)
+	}
+	timeline := strings.Join(current.timeline, "\n")
+	for _, expected := range []string{"Context compacted for lead:engineering", "91 → 7 messages", "exact transcript retained"} {
+		if !strings.Contains(timeline, expected) {
+			t.Fatalf("timeline omitted %q:\n%s", expected, timeline)
+		}
+	}
+	if strings.Contains(timeline, "alt-tool-output://private") {
+		t.Fatalf("private transcript reference leaked into the ordinary TUI:\n%s", timeline)
+	}
+
+	updated, command := model.handleCommand("/status")
+	model = updated.(Model)
+	if command != nil {
+		t.Fatal("/status unexpectedly started backend work")
+	}
+	rendered := ansi.Strip(model.renderedTranscript)
+	if !strings.Contains(rendered, "2 lossless compactions") {
+		t.Fatalf("status omitted context lifecycle:\n%s", rendered)
+	}
+}
+
 func TestStatusCardKeepsItsChronologicalPositionAcrossLaterTurns(t *testing.T) {
 	model, closeApp := testModel(t)
 	defer closeApp()

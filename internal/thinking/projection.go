@@ -525,6 +525,28 @@ func (t *Turn) apply(item event.Event) error {
 		incrementMetadata(node, "completion_tokens", data.CompletionTokens)
 		incrementMetadata(node, "reasoning_tokens", data.ReasoningTokens)
 		incrementMetadata(node, "total_tokens", data.TotalTokens)
+	case event.ContextViewCommitted:
+		data, err := event.Decode[event.ContextViewCommittedData](item)
+		if err != nil {
+			return err
+		}
+		node := t.contextTarget(data.ScopeKind, data.ScopeID)
+		setMetadata(node, "context_epoch", strconv.Itoa(data.Epoch))
+		setMetadata(node, "working_context_tokens", strconv.Itoa(data.EstimatedTokens))
+		setMetadata(node, "working_view_digest", data.ViewDigest)
+		if data.Compacted {
+			incrementMetadata(node, "projection_compactions", 1)
+		}
+	case event.ContextAgentCompacted:
+		data, err := event.Decode[event.ContextAgentCompactedData](item)
+		if err != nil {
+			return err
+		}
+		node := t.modelTarget(item.CorrelationID, data.Scope)
+		incrementMetadata(node, "agent_context_compactions", 1)
+		setMetadata(node, "exact_transcript", data.TranscriptReference)
+		setMetadata(node, "messages_before_compaction", strconv.Itoa(data.MessagesBefore))
+		setMetadata(node, "messages_after_compaction", strconv.Itoa(data.MessagesAfter))
 	}
 	t.Sequence = item.Sequence
 	t.UpdatedAt = item.At
@@ -645,12 +667,34 @@ func (t *Turn) modelTarget(correlationID, purpose string) *Node {
 	switch {
 	case purpose == "router":
 		return t.Nodes["router"]
-	case strings.HasPrefix(purpose, "member:"):
-		actor := strings.TrimPrefix(purpose, "member:")
+	case strings.HasPrefix(purpose, "member:"), strings.HasPrefix(purpose, "peer:"):
+		parts := strings.Split(purpose, ":")
+		actor := ""
+		if len(parts) > 1 {
+			actor = parts[1]
+		}
 		t.ensureMember(actor)
 		return t.Nodes[memberID(actor)]
 	case strings.HasPrefix(purpose, "lead:"), strings.HasPrefix(purpose, "final:"):
 		return t.Nodes[memberID(t.selectedLead)]
+	}
+	return t.Nodes["user"]
+}
+
+func (t *Turn) contextTarget(scopeKind, scopeID string) *Node {
+	switch scopeKind {
+	case "router":
+		return t.Nodes["router"]
+	case "lead", "final":
+		return t.Nodes[memberID(t.selectedLead)]
+	case "specialist":
+		return t.Nodes[t.ownerFor(scopeID)]
+	case "peer":
+		for _, edge := range t.Edges {
+			if edge.Kind == "peer" && edge.Metadata["collaboration_id"] == scopeID {
+				return t.Nodes[edge.To]
+			}
+		}
 	}
 	return t.Nodes["user"]
 }

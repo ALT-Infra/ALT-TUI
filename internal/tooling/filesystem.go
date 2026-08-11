@@ -27,6 +27,7 @@ var filesystemTools = []string{
 
 func (r *Runtime) filesystemTools(
 	ctx context.Context,
+	owner string,
 ) ([]tool.BaseTool, string, adk.ChatModelAgentMiddleware, error) {
 	enabled := make(map[string]bool, len(filesystemTools))
 	for _, name := range filesystemTools {
@@ -37,7 +38,12 @@ func (r *Runtime) filesystemTools(
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("create Eino local tool backend: %w", err)
 	}
-	backend := &rootedBackend{root: r.root, temp: r.temp, delegate: local}
+	backend := &rootedBackend{root: r.root, archive: r.archive, delegate: local}
+	reductionBackend := &rootedBackend{
+		root: r.root, archive: r.archive, delegate: local,
+		allowArchiveWrite: true, archiveOwner: owner,
+		archiveOutput: r.options.ArchiveToolOutput,
+	}
 	prompt := fmt.Sprintf(
 		"Your filesystem workspace is %s. Use relative paths within it. File tools reject lexical paths and symlink resolutions outside this workspace. Only tools made available to this assignment may be called.",
 		r.root,
@@ -67,8 +73,11 @@ func (r *Runtime) filesystemTools(
 	// runtime storage and replaces the model-visible result with bounded
 	// head/tail previews plus an opaque read_file path. This is lossless:
 	// read_file's offset/limit contract pages through the complete result.
-	// SkipClear prevents this guard from rewriting historical context.
-	reducer, err := r.toolResultReductionHandler(ctx, backend)
+	// Historical tool rounds are also cleared once the agent loop crosses its
+	// working budget. Their exact results are offloaded first, and the retained
+	// placeholder remains addressable through read_file. Both paths use the
+	// request's durable archive rather than an ephemeral process directory.
+	reducer, err := r.toolResultReductionHandler(ctx, owner, reductionBackend)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("create Eino tool-result reduction middleware: %w", err)
 	}
@@ -77,17 +86,27 @@ func (r *Runtime) filesystemTools(
 
 func (r *Runtime) toolResultReductionHandler(
 	ctx context.Context,
+	owner string,
 	backend reduction.Backend,
 ) (adk.ChatModelAgentMiddleware, error) {
 	return reduction.New(ctx, &reduction.Config{
-		Backend:          backend,
-		SkipClear:        true,
-		ReadFileToolName: filesystemmw.ToolNameReadFile,
+		Backend:                   backend,
+		SkipClear:                 false,
+		ReadFileToolName:          filesystemmw.ToolNameReadFile,
+		MaxTokensForClear:         80_000,
+		ClearRetentionSuffixLimit: 2,
+		ClearAtLeastTokens:        16_000,
 		GenTruncOffloadFilePath: func(_ context.Context, detail *reduction.ToolDetail) (string, error) {
 			if detail == nil || detail.ToolContext == nil {
-				return r.toolOutputPath("tool", ""), nil
+				return r.toolOutputPathFor(owner, "tool", ""), nil
 			}
-			return r.toolOutputPath(detail.ToolContext.Name, detail.ToolContext.CallID), nil
+			return r.toolOutputPathFor(owner, detail.ToolContext.Name, detail.ToolContext.CallID), nil
+		},
+		GenClearOffloadFilePath: func(_ context.Context, detail *reduction.ToolDetail) (string, error) {
+			if detail == nil || detail.ToolContext == nil {
+				return r.toolOutputPathFor(owner, "cleared-tool", ""), nil
+			}
+			return r.toolOutputPathFor(owner, "cleared:"+detail.ToolContext.Name, detail.ToolContext.CallID), nil
 		},
 	})
 }
@@ -101,9 +120,12 @@ func toggle(enabled bool) *filesystemmw.ToolConfig {
 }
 
 type rootedBackend struct {
-	root     string
-	temp     string
-	delegate adkfilesystem.Backend
+	root              string
+	archive           string
+	delegate          adkfilesystem.Backend
+	allowArchiveWrite bool
+	archiveOwner      string
+	archiveOutput     func(context.Context, string, string, []byte) error
 }
 
 func (b *rootedBackend) LsInfo(ctx context.Context, req *adkfilesystem.LsInfoRequest) ([]adkfilesystem.FileInfo, error) {
@@ -147,16 +169,38 @@ func (b *rootedBackend) GlobInfo(ctx context.Context, req *adkfilesystem.GlobInf
 }
 
 func (b *rootedBackend) Write(ctx context.Context, req *adkfilesystem.WriteRequest) error {
+	private := strings.HasPrefix(req.FilePath, toolOutputPathPrefix)
+	if private && !b.allowArchiveWrite {
+		return fmt.Errorf("private archived tool outputs are immutable")
+	}
 	path, err := b.resolve(req.FilePath)
 	if err != nil {
 		return err
 	}
+	if private {
+		content := []byte(req.Content)
+		if err := writeImmutableFile(path, content); err != nil {
+			return err
+		}
+		if b.archiveOutput != nil {
+			if err := b.archiveOutput(ctx, b.archiveOwner, req.FilePath, content); err != nil {
+				return fmt.Errorf("index exact tool output: %w", err)
+			}
+		}
+		return nil
+	}
 	copy := *req
 	copy.FilePath = path
-	return b.delegate.Write(ctx, &copy)
+	if err := b.delegate.Write(ctx, &copy); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (b *rootedBackend) Edit(ctx context.Context, req *adkfilesystem.EditRequest) error {
+	if strings.HasPrefix(req.FilePath, toolOutputPathPrefix) {
+		return fmt.Errorf("private archived tool outputs are immutable")
+	}
 	path, err := b.resolve(req.FilePath)
 	if err != nil {
 		return err
@@ -200,14 +244,14 @@ func (b *rootedBackend) resolve(path string) (string, error) {
 }
 
 func (b *rootedBackend) resolveToolOutput(path string) (string, error) {
-	if b.temp == "" {
-		return "", fmt.Errorf("private tool-output storage is unavailable")
+	if b.archive == "" {
+		return "", fmt.Errorf("durable tool-output storage is unavailable")
 	}
 	relative := strings.TrimPrefix(path, toolOutputPathPrefix)
 	if relative == "" {
 		return "", fmt.Errorf("invalid private tool-output path")
 	}
-	storageRoot := filepath.Join(b.temp, "tool-output")
+	storageRoot := filepath.Join(b.archive, "tool-output")
 	candidate := filepath.Clean(filepath.Join(storageRoot, filepath.FromSlash(relative)))
 	contained, err := filepath.Rel(storageRoot, candidate)
 	if err != nil {

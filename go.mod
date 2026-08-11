@@ -10,7 +10,7 @@ require (
 	github.com/alecthomas/chroma/v2 v2.14.0
 	github.com/bluekeyes/go-gitdiff v0.9.0
 	github.com/charmbracelet/x/ansi v0.11.7
-	github.com/cloudwego/eino v0.9.13
+	github.com/cloudwego/eino v0.9.14-0.20260722035527-ca0441ac0bce
 	github.com/cloudwego/eino-ext/adk/backend/local v0.2.6
 	github.com/cloudwego/eino-ext/components/model/openai v0.1.13
 	github.com/creack/pty v1.1.24

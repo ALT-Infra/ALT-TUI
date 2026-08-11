@@ -24,6 +24,7 @@ type turnView struct {
 	answer            string
 	status            store.SessionStatus
 	tokens            int
+	compactions       int
 	queuedDelegations int
 	activeDelegations int
 	startedAt         time.Time
@@ -39,6 +40,7 @@ type statusSnapshot struct {
 	directory   string
 	members     string
 	tokens      string
+	context     string
 	queue       string
 	permissions string
 	research    string
@@ -209,6 +211,7 @@ func (m Model) captureStatus() statusSnapshot {
 	state := "idle"
 	members := "0 active · 0 queued"
 	tokens := "0"
+	contextState := "no compaction"
 	if current := m.current(); current != nil {
 		reference := m.conversationID
 		if reference == "" {
@@ -220,6 +223,9 @@ func (m Model) captureStatus() statusSnapshot {
 		state = string(current.status)
 		members = fmt.Sprintf("%d active · %d queued", current.activeDelegations, current.queuedDelegations)
 		tokens = fmt.Sprintf("%d", current.tokens)
+		if current.compactions > 0 {
+			contextState = fmt.Sprintf("%d lossless compactions", current.compactions)
+		}
 	}
 	permissions := "sandboxed · network isolated"
 	if m.app.RuntimePolicy.DangerouslyBypassApprovalsAndSandbox {
@@ -231,7 +237,7 @@ func (m Model) captureStatus() statusSnapshot {
 	}
 	return statusSnapshot{
 		team: team, session: session, state: state, directory: m.workspace,
-		members: members, tokens: tokens,
+		members: members, tokens: tokens, context: contextState,
 		queue: fmt.Sprintf("%d prompts", len(m.queued)), permissions: permissions,
 		research: researchProvider,
 	}
@@ -259,6 +265,7 @@ func renderStatusSnapshot(snapshot statusSnapshot, width int, dark bool) string 
 		row("Directory", snapshot.directory),
 		row("Members", snapshot.members),
 		row("Token usage", snapshot.tokens),
+		row("Context", snapshot.context),
 		row("Queue", snapshot.queue),
 		row("Permissions", snapshot.permissions),
 		row("Research", snapshot.research),
@@ -347,6 +354,9 @@ func renderTurnSummary(turn turnView, width int, dark bool) string {
 	}
 	if turn.tokens > 0 {
 		label += fmt.Sprintf(" · %d tokens", turn.tokens)
+	}
+	if turn.compactions > 0 {
+		label += fmt.Sprintf(" · %d context compactions", turn.compactions)
 	}
 	prefix := "─ " + label + " "
 	fill := strings.Repeat("─", max(0, width-ansi.StringWidth(prefix)))

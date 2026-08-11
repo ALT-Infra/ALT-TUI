@@ -6,6 +6,7 @@ import (
 	"sort"
 
 	"altv1/internal/event"
+	"altv1/internal/store"
 )
 
 type DelegationStatus string
@@ -18,53 +19,74 @@ const (
 	DelegationCancelled DelegationStatus = "cancelled"
 )
 
+const (
+	projectionTraceLimit       = 64
+	projectionInstructionLimit = 64
+)
+
 type Delegation struct {
-	Spec        event.DelegationSpec
-	Status      DelegationStatus
-	Attempt     int
-	Interrupted bool
-	Result      string
-	Findings    []string
-	Risks       []string
-	Confidence  float64
-	Error       string
+	Spec            event.DelegationSpec
+	SpecReference   string
+	SpecSequence    int64
+	Status          DelegationStatus
+	Attempt         int
+	Interrupted     bool
+	Result          string
+	ResultReference string
+	ResultSequence  int64
+	Findings        []string
+	Risks           []string
+	Confidence      float64
+	Error           string
 }
 
 type PeerTurn struct {
-	Spec        event.PeerTurnSpec
-	Status      DelegationStatus
-	Attempt     int
-	Interrupted bool
-	Result      string
-	Findings    []string
-	Risks       []string
-	Confidence  float64
-	Error       string
+	Spec            event.PeerTurnSpec
+	SpecReference   string
+	SpecSequence    int64
+	Status          DelegationStatus
+	Attempt         int
+	Interrupted     bool
+	Result          string
+	ResultReference string
+	ResultSequence  int64
+	Findings        []string
+	Risks           []string
+	Confidence      float64
+	Error           string
 }
 
 type Projection struct {
-	SessionID           string
-	Task                string
-	ConversationHistory []ConversationTurn
-	UserInstructions    []string
-	LeadID              string
-	LeadConfidence      float64
-	LeadBasis           string
-	LeadTurns           int
-	Delegations         map[string]*Delegation
-	PeerTurns           map[string]*PeerTurn
-	FinalAnswer         string
-	Terminal            bool
-	Failed              bool
-	Cancelled           bool
-	ModelCalls          int
-	TotalTokens         int
-	LastSequence        int64
+	SessionID                 string
+	Task                      string
+	TaskReference             string
+	ConversationHistory       []ConversationTurn
+	UserInstructions          []string
+	UserInstructionReferences []string
+	UserInstructionsArchived  int
+	ObservableTrace           []ConversationTrace
+	ObservableTraceArchived   int
+	LeadID                    string
+	LeadConfidence            float64
+	LeadBasis                 string
+	LeadTurns                 int
+	Delegations               map[string]*Delegation
+	PeerTurns                 map[string]*PeerTurn
+	FinalAnswer               string
+	Terminal                  bool
+	Failed                    bool
+	Cancelled                 bool
+	ModelCalls                int
+	TotalTokens               int
+	LastSequence              int64
 }
 
 type ConversationTurn struct {
+	SessionID       string              `json:"session_id"`
 	Task            string              `json:"task"`
+	TaskReference   string              `json:"task_reference,omitempty"`
 	Answer          string              `json:"answer,omitempty"`
+	AnswerReference string              `json:"answer_reference,omitempty"`
 	Status          string              `json:"status"`
 	LeadID          string              `json:"lead_id,omitempty"`
 	ObservableTrace []ConversationTrace `json:"observable_trace,omitempty"`
@@ -74,6 +96,7 @@ type ConversationTurn struct {
 // never fabricated model thought: every entry is copied from an event that ALT
 // actually persisted for an earlier turn in this conversation.
 type ConversationTrace struct {
+	Reference     string          `json:"reference"`
 	Sequence      int64           `json:"sequence"`
 	Kind          event.Kind      `json:"kind"`
 	Actor         string          `json:"actor,omitempty"`
@@ -105,12 +128,20 @@ func (p *Projection) Apply(item event.Event) error {
 			return err
 		}
 		p.Task = data.Task
+		p.TaskReference = store.ContextReferenceForEvent(item)
 	case event.UserInstruction:
 		data, err := event.Decode[event.UserInstructionData](item)
 		if err != nil {
 			return err
 		}
 		p.UserInstructions = append(p.UserInstructions, data.Text)
+		p.UserInstructionReferences = append(p.UserInstructionReferences, store.ContextReferenceForEvent(item))
+		if len(p.UserInstructions) > projectionInstructionLimit {
+			remove := len(p.UserInstructions) - projectionInstructionLimit
+			p.UserInstructions = append([]string(nil), p.UserInstructions[remove:]...)
+			p.UserInstructionReferences = append([]string(nil), p.UserInstructionReferences[remove:]...)
+			p.UserInstructionsArchived += remove
+		}
 	case event.LeadSelected:
 		data, err := event.Decode[event.LeadSelectedData](item)
 		if err != nil {
@@ -127,13 +158,24 @@ func (p *Projection) Apply(item event.Event) error {
 		if data.Turn > p.LeadTurns {
 			p.LeadTurns = data.Turn
 		}
+	case event.ToolCalled, event.ToolCompleted:
+		p.ObservableTrace = append(p.ObservableTrace, ConversationTrace{
+			Reference: store.ContextReferenceForEvent(item), Sequence: item.Sequence,
+			Kind: item.Kind, Actor: item.Actor, CorrelationID: item.CorrelationID,
+			Data: append(json.RawMessage(nil), item.Data...),
+		})
+		if len(p.ObservableTrace) > projectionTraceLimit {
+			remove := len(p.ObservableTrace) - projectionTraceLimit
+			p.ObservableTrace = append([]ConversationTrace(nil), p.ObservableTrace[remove:]...)
+			p.ObservableTraceArchived += remove
+		}
 	case event.DelegationCreated:
 		data, err := event.Decode[event.DelegationSpec](item)
 		if err != nil {
 			return err
 		}
 		spec := data
-		p.Delegations[data.ID] = &Delegation{Spec: spec, Status: DelegationPending}
+		p.Delegations[data.ID] = &Delegation{Spec: spec, SpecReference: store.ContextReferenceForEvent(item), SpecSequence: item.Sequence, Status: DelegationPending}
 	case event.DelegationStarted:
 		data, err := event.Decode[event.DelegationStartedData](item)
 		if err != nil {
@@ -154,6 +196,8 @@ func (p *Projection) Apply(item event.Event) error {
 			delegation.Status = DelegationCompleted
 			delegation.Attempt = data.Attempt
 			delegation.Result = data.Result
+			delegation.ResultReference = store.ContextReferenceForEvent(item)
+			delegation.ResultSequence = item.Sequence
 			delegation.Findings = append([]string(nil), data.Findings...)
 			delegation.Risks = append([]string(nil), data.Risks...)
 			delegation.Confidence = data.Confidence
@@ -186,7 +230,7 @@ func (p *Projection) Apply(item event.Event) error {
 			return err
 		}
 		spec := data
-		p.PeerTurns[data.ID] = &PeerTurn{Spec: spec, Status: DelegationPending}
+		p.PeerTurns[data.ID] = &PeerTurn{Spec: spec, SpecReference: store.ContextReferenceForEvent(item), SpecSequence: item.Sequence, Status: DelegationPending}
 	case event.PeerTurnStarted:
 		data, err := event.Decode[event.PeerTurnStartedData](item)
 		if err != nil {
@@ -202,6 +246,8 @@ func (p *Projection) Apply(item event.Event) error {
 		}
 		if turn := p.PeerTurns[data.PeerTurnID]; turn != nil {
 			turn.Status, turn.Attempt, turn.Result = DelegationCompleted, data.Attempt, data.Result
+			turn.ResultReference = store.ContextReferenceForEvent(item)
+			turn.ResultSequence = item.Sequence
 			turn.Findings, turn.Risks, turn.Confidence = append([]string(nil), data.Findings...), append([]string(nil), data.Risks...), data.Confidence
 			turn.Interrupted, turn.Error = false, ""
 		}

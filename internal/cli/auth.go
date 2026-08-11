@@ -100,6 +100,10 @@ func (s *commandState) authStatusCommand() *cobra.Command {
 			}
 			for _, connection := range connections {
 				_, source, lookupErr := credentials.Lookup(connection.ID, connection.CredentialEnvironment)
+				if errors.Is(lookupErr, credential.ErrInvalid) {
+					fmt.Fprintf(s.out, "%s: invalid (%s)\n", connection.ID, lookupErr)
+					continue
+				}
 				if errors.Is(lookupErr, credential.ErrNotFound) {
 					fmt.Fprintf(s.out, "%s: not configured\n", connection.ID)
 					continue

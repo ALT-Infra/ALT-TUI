@@ -39,11 +39,15 @@ func (r *sessionRuntime) runToolMember(
 		"member:"+member.ID,
 		delegation.Spec.ID,
 	)(chat)
-	runtimeHandlers, err := r.tools.Handlers(ctx, "member:"+member.ID+":"+delegation.Spec.ID)
+	toolOwner := fmt.Sprintf("member:%s:%s:%d", member.ID, delegation.Spec.ID, attempt)
+	runtimeHandlers, err := r.tools.HandlersWithCompaction(ctx, toolOwner, chat)
 	if err != nil {
 		return "", err
 	}
 	system, user := memberMessages(r.profile, member, delegation)
+	if _, err := r.commitWorkingView(ctx, "specialist", delegation.Spec.ID, delegation.SpecSequence, user); err != nil {
+		return "", err
+	}
 	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name:          "member-" + member.ID,
 		Description:   r.profile.MemberDefinition(member),

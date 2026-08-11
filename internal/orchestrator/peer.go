@@ -56,7 +56,7 @@ func (r *sessionRuntime) executePeerTurn(parent context.Context, turnID string, 
 		return
 	}
 
-	raw, runErr := r.runPeerMember(ctx, peer, turn, state.CollaborationTurns(turn.Spec.CollaborationID), attempt)
+	raw, runErr := r.runPeerMember(ctx, peer, turn, state.CollaborationTurns(turn.Spec.CollaborationID), state.LastSequence, attempt)
 	if runErr != nil {
 		r.handlePeerTurnFailure(parent, turnID, peer.ID, attempt, runErr)
 		return
@@ -88,6 +88,7 @@ func (r *sessionRuntime) runPeerMember(
 	peer profile.MemberAssignment,
 	turn *PeerTurn,
 	history []*PeerTurn,
+	sourceThrough int64,
 	attempt int,
 ) (string, error) {
 	capabilities := r.providers.Capabilities(r.profile.Gateway, r.profile.Models[peer.Model])
@@ -99,11 +100,15 @@ func (r *sessionRuntime) runPeerMember(
 		return "", err
 	}
 	chat = r.observeModel(peer.Model, "peer:"+peer.ID, turn.Spec.ID)(chat)
-	handlers, err := r.tools.Handlers(ctx, "peer:"+peer.ID+":"+turn.Spec.CollaborationID)
+	toolOwner := fmt.Sprintf("peer:%s:%s:%d:%d", peer.ID, turn.Spec.CollaborationID, turn.Spec.Round, attempt)
+	handlers, err := r.tools.HandlersWithCompaction(ctx, toolOwner, chat)
 	if err != nil {
 		return "", err
 	}
 	system, user := peerMessages(r.profile, peer, turn, history)
+	if _, err := r.commitWorkingView(ctx, "peer", turn.Spec.CollaborationID, sourceThrough, user); err != nil {
+		return "", err
+	}
 	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name: "peer-" + peer.ID, Description: r.profile.MemberDefinition(peer),
 		Instruction: system, Model: chat, Handlers: tooling.AgentHandlers(handlers...),

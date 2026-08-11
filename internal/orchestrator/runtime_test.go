@@ -49,6 +49,62 @@ func TestCurrentRuntimeUsesCancellationWithoutInventedCeilings(t *testing.T) {
 	}
 }
 
+func TestConversationHistoryLoadsDetailsOnlyForBoundedRecentTurns(t *testing.T) {
+	ctx := context.Background()
+	ledger, err := store.OpenMemory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	document, err := profile.Parse([]byte(testProfile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.ImportProfile(ctx, document); err != nil {
+		t.Fatal(err)
+	}
+
+	current, err := ledger.CreateSession(ctx, document, "turn 0", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const completedTurns = recentConversationLimit + 5
+	for turn := 0; turn < completedTurns; turn++ {
+		if _, err := ledger.Append(ctx, current.ID, event.Draft{
+			Kind: event.FinalCompleted, Actor: "architecture-lead",
+			Data: event.FinalCompletedData{Answer: fmt.Sprintf("answer %d", turn)},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		current, err = ledger.CreateContinuation(ctx, current.ID, document, fmt.Sprintf("turn %d", turn+1))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	runtime := newSessionRuntime(ledger, nil, current, document, nil)
+	if err := runtime.loadConversationHistory(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(runtime.conversationHistory) != completedTurns {
+		t.Fatalf("history turns = %d, want %d", len(runtime.conversationHistory), completedTurns)
+	}
+	archived := completedTurns - recentConversationLimit
+	for index, turn := range runtime.conversationHistory[:archived] {
+		if turn.Task != "" || turn.Answer != "" || len(turn.ObservableTrace) != 0 {
+			t.Fatalf("archived turn %d loaded unbounded detail: %#v", index, turn)
+		}
+		if turn.Status != string(store.SessionCompleted) {
+			t.Fatalf("archived turn %d lost status: %#v", index, turn)
+		}
+	}
+	for index, turn := range runtime.conversationHistory[archived:] {
+		if turn.Task == "" || turn.Answer == "" || turn.TaskReference == "" || turn.AnswerReference == "" {
+			t.Fatalf("recent turn %d lacks bounded exact provenance: %#v", index, turn)
+		}
+	}
+}
+
 func TestAdaptiveParallelAndSequentialLanes(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

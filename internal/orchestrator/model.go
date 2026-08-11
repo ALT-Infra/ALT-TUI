@@ -55,7 +55,8 @@ func generateStructured[T any](
 	if usageErr := recordUsage(ctx, ledger, sessionID, modelReference, purpose, spec, response.ResponseMeta); usageErr != nil {
 		return zero, usageErr
 	}
-	value, parseErr := decodeJSONObject[T](response.Content)
+	responseText := messageText(response)
+	value, parseErr := decodeJSONObject[T](responseText)
 	if parseErr == nil && validate != nil {
 		parseErr = validate(value)
 	}
@@ -67,7 +68,7 @@ func generateStructured[T any](
 	// an explicit correction containing the observed validation failure. We do
 	// not repeat transport errors or cycle through an arbitrary retry count.
 	messages = append(messages,
-		response,
+		structuredCorrectionMessage(responseText),
 		schema.UserMessage("Your response was invalid: "+parseErr.Error()+". Correct that exact defect and return only the required JSON object."),
 	)
 	corrected, err := chat.Generate(ctx, messages)
@@ -77,7 +78,7 @@ func generateStructured[T any](
 	if usageErr := recordUsage(ctx, ledger, sessionID, modelReference, purpose+":correction", spec, corrected.ResponseMeta); usageErr != nil {
 		return zero, usageErr
 	}
-	value, correctionErr := decodeJSONObject[T](corrected.Content)
+	value, correctionErr := decodeJSONObject[T](messageText(corrected))
 	if correctionErr == nil && validate != nil {
 		correctionErr = validate(value)
 	}
@@ -85,6 +86,19 @@ func generateStructured[T any](
 		return zero, fmt.Errorf("%s remained invalid after explicit correction: %w", purpose, correctionErr)
 	}
 	return value, nil
+}
+
+// structuredCorrectionMessage preserves the malformed text without replaying
+// provider-only reasoning, unmatched tool calls, or an empty assistant frame.
+// Some OpenAI-compatible gateways reject assistant messages that contain
+// neither text nor tool calls, so an empty first attempt must still produce a
+// valid correction conversation.
+func structuredCorrectionMessage(raw string) *schema.Message {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		raw = "[The previous response contained no JSON content.]"
+	}
+	return schema.AssistantMessage(raw, nil)
 }
 
 func streamText(

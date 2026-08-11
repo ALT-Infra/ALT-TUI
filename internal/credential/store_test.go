@@ -128,3 +128,26 @@ func TestEnvironmentCredentialTakesPrecedence(t *testing.T) {
 		t.Fatalf("Lookup = (%q, %q), want environment credential", value, source)
 	}
 }
+
+func TestCredentialsRejectEmbeddedControlCharactersBeforeHTTPUse(t *testing.T) {
+	store := Store{dataDir: t.TempDir(), keyring: unavailableKeyring{}}
+	if _, err := store.Set("exa", "exa-key\x1b"); err == nil {
+		t.Fatal("Set accepted a credential that cannot be placed in an HTTP header")
+	}
+
+	path, err := store.privateFilePath("exa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("x\x00"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Lookup("exa", ""); err == nil {
+		t.Fatal("Lookup exposed an invalid stored credential to a provider client")
+	} else if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("Lookup error = %v, want ErrInvalid", err)
+	}
+}

@@ -218,6 +218,56 @@ func TestProjectionDistinguishesToolDiscoveryAndResearchProvider(t *testing.T) {
 	}
 }
 
+func TestProjectionAttachesContextLifecycleToItsActualScope(t *testing.T) {
+	projection := testProjection(t)
+	apply(t, projection,
+		event.Draft{Kind: event.SessionCreated, Data: event.SessionCreatedData{Task: "context"}},
+		event.Draft{Kind: event.RouterStarted},
+		event.Draft{Kind: event.LeadSelected, Data: event.LeadSelectedData{LeadID: "engineering"}},
+		event.Draft{Kind: event.DelegationCreated, Data: event.DelegationSpec{
+			ID: "research-call", MemberID: "research", Objective: "inspect evidence",
+		}},
+		event.Draft{Kind: event.ContextViewCommitted, Data: event.ContextViewCommittedData{
+			ScopeKind: "specialist", ScopeID: "research-call", Epoch: 4,
+			EstimatedTokens: 8192, ViewDigest: "specialist-view", Compacted: true,
+		}},
+		event.Draft{Kind: event.ContextAgentCompacted, CorrelationID: "research-call", Data: event.ContextAgentCompactedData{
+			Scope: "member:research", TranscriptReference: "alt-tool-output://research-transcript",
+			MessagesBefore: 84, MessagesAfter: 6,
+		}},
+		event.Draft{Kind: event.PeerTurnCreated, Data: event.PeerTurnSpec{
+			ID: "peer-turn-1", CollaborationID: "collaboration-1", PeerID: "verification",
+			Objective: "challenge the finding", Round: 1,
+		}},
+		event.Draft{Kind: event.ContextViewCommitted, Data: event.ContextViewCommittedData{
+			ScopeKind: "peer", ScopeID: "collaboration-1", Epoch: 2,
+			EstimatedTokens: 4096, ViewDigest: "peer-view",
+		}},
+		event.Draft{Kind: event.ContextAgentCompacted, CorrelationID: "peer-turn-1", Data: event.ContextAgentCompactedData{
+			Scope: "peer:verification", TranscriptReference: "alt-tool-output://peer-transcript",
+			MessagesBefore: 82, MessagesAfter: 5,
+		}},
+	)
+
+	research := projection.Active.Nodes["member:research"]
+	if research == nil || research.Metadata["context_epoch"] != "4" ||
+		research.Metadata["projection_compactions"] != "1" ||
+		research.Metadata["exact_transcript"] != "alt-tool-output://research-transcript" ||
+		research.Metadata["messages_before_compaction"] != "84" {
+		t.Fatalf("specialist context metadata = %#v", research)
+	}
+	verification := projection.Active.Nodes["member:verification"]
+	if verification == nil || verification.Metadata["context_epoch"] != "2" ||
+		verification.Metadata["working_view_digest"] != "peer-view" ||
+		verification.Metadata["exact_transcript"] != "alt-tool-output://peer-transcript" ||
+		verification.Metadata["messages_after_compaction"] != "5" {
+		t.Fatalf("peer context metadata = %#v", verification)
+	}
+	if lead := projection.Active.Nodes["member:engineering"]; lead.Metadata["exact_transcript"] != "" {
+		t.Fatalf("specialist or peer compaction was attached to Lead: %#v", lead.Metadata)
+	}
+}
+
 func testProjection(t *testing.T) *thinking.Projection {
 	t.Helper()
 	value := profile.Profile{

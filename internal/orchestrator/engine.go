@@ -27,6 +27,7 @@ type Engine struct {
 type EngineOptions struct {
 	DangerouslyBypassApprovalsAndSandbox bool
 	SensitiveEnvironment                 []string
+	ContextArchiveRoot                   string
 	ResolveResearchProvider              func(context.Context) (string, error)
 	ResolveExaCredential                 func() (string, error)
 	ResolveLinkupCredential              func() (string, error)

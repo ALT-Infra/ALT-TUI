@@ -191,6 +191,9 @@ func (s *Store) createSession(
 		if err := insertEvent(ctx, tx, item); err != nil {
 			return nil, err
 		}
+		if err := insertContextRecord(ctx, tx, item); err != nil {
+			return nil, err
+		}
 		materialized = append(materialized, item)
 	}
 	if err := tx.Commit(); err != nil {

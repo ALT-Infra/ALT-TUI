@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -79,7 +80,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create data directory: %w", err)
 	}
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", sqliteDSN(path))
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
@@ -93,6 +94,19 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+func sqliteDSN(path string) string {
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	// These pragmas are connection-local. Put them in the DSN so every pooled
+	// connection enforces the same authority and durability contract.
+	return path + separator +
+		"_pragma=foreign_keys(1)" +
+		"&_pragma=busy_timeout(5000)" +
+		"&_pragma=synchronous(FULL)"
 }
 
 func OpenMemory(ctx context.Context) (*Store, error) {
@@ -118,7 +132,7 @@ func (s *Store) DB() *sql.DB {
 func (s *Store) initialize(ctx context.Context) error {
 	statements := []string{
 		`PRAGMA journal_mode=WAL`,
-		`PRAGMA synchronous=NORMAL`,
+		`PRAGMA synchronous=FULL`,
 		`PRAGMA foreign_keys=ON`,
 		`PRAGMA busy_timeout=5000`,
 		`CREATE TABLE IF NOT EXISTS profile_revisions (
@@ -165,11 +179,86 @@ func (s *Store) initialize(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS events_session_kind
 			ON events(session_id, kind, sequence)`,
+		`CREATE TABLE IF NOT EXISTS context_records (
+			id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL,
+			source_sequence INTEGER NOT NULL,
+			kind TEXT NOT NULL,
+			actor TEXT NOT NULL DEFAULT '',
+			correlation_id TEXT NOT NULL DEFAULT '',
+			causation_id TEXT NOT NULL DEFAULT '',
+			content BLOB NOT NULL,
+			digest TEXT NOT NULL,
+			byte_count INTEGER NOT NULL,
+			created_at TEXT NOT NULL,
+			UNIQUE(session_id, source_sequence),
+			FOREIGN KEY (session_id, source_sequence)
+				REFERENCES events(session_id, sequence) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS context_records_scope
+			ON context_records(session_id, correlation_id, source_sequence)`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS context_records_fts USING fts5(
+			record_id UNINDEXED,
+			session_id UNINDEXED,
+			content,
+			tokenize = 'unicode61'
+		)`,
+		`CREATE TRIGGER IF NOT EXISTS context_records_delete_fts
+			AFTER DELETE ON context_records BEGIN
+				DELETE FROM context_records_fts WHERE rowid = old.rowid;
+			END`,
+		`CREATE TABLE IF NOT EXISTS context_epochs (
+			session_id TEXT NOT NULL,
+			scope_kind TEXT NOT NULL,
+			scope_id TEXT NOT NULL,
+			epoch INTEGER NOT NULL,
+			source_through_sequence INTEGER NOT NULL,
+			view BLOB NOT NULL,
+			view_digest TEXT NOT NULL,
+			estimated_tokens INTEGER NOT NULL,
+			created_at TEXT NOT NULL,
+			PRIMARY KEY(session_id, scope_kind, scope_id, epoch),
+			FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS context_epochs_latest
+			ON context_epochs(session_id, scope_kind, scope_id, epoch DESC)`,
+		`CREATE TABLE IF NOT EXISTS context_artifacts (
+			reference TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL,
+			owner TEXT NOT NULL,
+			content BLOB NOT NULL,
+			digest TEXT NOT NULL,
+			byte_count INTEGER NOT NULL,
+			created_at TEXT NOT NULL,
+			FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS context_artifacts_scope
+			ON context_artifacts(session_id, owner, created_at)`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS context_artifacts_fts USING fts5(
+			reference UNINDEXED,
+			session_id UNINDEXED,
+			content,
+			tokenize = 'unicode61'
+		)`,
+		`CREATE TRIGGER IF NOT EXISTS context_artifacts_delete_fts
+			AFTER DELETE ON context_artifacts BEGIN
+				DELETE FROM context_artifacts_fts WHERE rowid = old.rowid;
+			END`,
 		`CREATE TABLE IF NOT EXISTS checkpoints (
 			key TEXT PRIMARY KEY,
 			value BLOB NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS checkpoint_versions (
+			key TEXT NOT NULL,
+			version INTEGER NOT NULL,
+			value BLOB NOT NULL,
+			digest TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			PRIMARY KEY(key, version)
+		)`,
+		`CREATE INDEX IF NOT EXISTS checkpoint_versions_latest
+			ON checkpoint_versions(key, version DESC)`,
 		`CREATE TABLE IF NOT EXISTS settings (
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL,
@@ -180,6 +269,15 @@ func (s *Store) initialize(ctx context.Context) error {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("initialize sqlite: %w", err)
 		}
+	}
+	if err := s.ensureContextRecordCausation(ctx); err != nil {
+		return err
+	}
+	if err := s.backfillContextRecords(ctx); err != nil {
+		return err
+	}
+	if err := s.backfillCheckpointVersions(ctx); err != nil {
+		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `
 		CREATE INDEX IF NOT EXISTS sessions_conversation_created
@@ -192,6 +290,50 @@ func (s *Store) initialize(ctx context.Context) error {
 	}
 	if mode != "wal" && mode != "memory" {
 		return fmt.Errorf("sqlite WAL unavailable: journal_mode=%s", mode)
+	}
+	return nil
+}
+
+func (s *Store) ensureContextRecordCausation(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(context_records)`)
+	if err != nil {
+		return fmt.Errorf("inspect context record schema: %w", err)
+	}
+	found := false
+	for rows.Next() {
+		var ordinal int
+		var name, dataType string
+		var notNull, primaryKey int
+		var defaultValue any
+		if err := rows.Scan(&ordinal, &name, &dataType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan context record schema: %w", err)
+		}
+		if name == "causation_id" {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate context record schema: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close context record schema: %w", err)
+	}
+	if !found {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE context_records ADD COLUMN causation_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add context causation metadata: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE context_records
+		SET causation_id = COALESCE((
+			SELECT e.causation_id FROM events e
+			WHERE e.session_id = context_records.session_id
+			  AND e.sequence = context_records.source_sequence
+		), '')
+		WHERE causation_id = ''`); err != nil {
+		return fmt.Errorf("backfill context causation metadata: %w", err)
 	}
 	return nil
 }

@@ -44,7 +44,8 @@ user-facing answer with a coordination decision.`
 		if capabilities.ToolCalling == provider.CapabilityUnsupported {
 			instruction += "\nThe authenticated gateway catalog explicitly marks this model as tool-call unsupported. Coordinate using the supplied durable state and delegated members; do not claim to inspect the workspace directly."
 		} else {
-			runtimeHandlers, err := r.tools.Handlers(ctx, "lead:"+lead.ID)
+			toolOwner := fmt.Sprintf("lead:%s:%d:%s", lead.ID, turn, strategy)
+			runtimeHandlers, err := r.tools.HandlersWithCompaction(ctx, toolOwner, chat)
 			if err != nil {
 				return LeadDecision{}, err
 			}

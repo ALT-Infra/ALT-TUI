@@ -45,6 +45,10 @@ func (r *sessionRuntime) runToolMember(
 		return "", err
 	}
 	system, user := memberMessages(r.profile, member, delegation)
+	userMessage, err := r.richUserMessage(ctx, member.Model, user, delegation.Spec.Attachments)
+	if err != nil {
+		return "", err
+	}
 	if _, err := r.commitWorkingView(ctx, "specialist", delegation.Spec.ID, delegation.SpecSequence, user); err != nil {
 		return "", err
 	}
@@ -64,7 +68,7 @@ func (r *sessionRuntime) runToolMember(
 	})
 	iterator := runner.Run(
 		ctx,
-		[]*schema.Message{schema.UserMessage(user)},
+		[]*schema.Message{userMessage},
 		adk.WithCheckPointID(fmt.Sprintf("delegation:%s:%d", delegation.Spec.ID, attempt)),
 	)
 

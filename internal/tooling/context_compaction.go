@@ -69,6 +69,18 @@ func (r *Runtime) archiveAgentTranscript(ctx context.Context, owner string, mess
 			continue
 		}
 		copy := *message
+		if len(copy.UserInputMultiContent) > 0 {
+			copy.UserInputMultiContent = append([]schema.MessageInputPart(nil), copy.UserInputMultiContent...)
+			for index := range copy.UserInputMultiContent {
+				part := &copy.UserInputMultiContent[index]
+				if part.Image == nil || part.Extra == nil || part.Extra["alt_artifact_reference"] == nil {
+					continue
+				}
+				imageCopy := *part.Image
+				imageCopy.Base64Data = nil
+				part.Image = &imageCopy
+			}
+		}
 		if !r.options.PersistReasoning {
 			copy.ReasoningContent = ""
 			if len(copy.AssistantGenMultiContent) > 0 {

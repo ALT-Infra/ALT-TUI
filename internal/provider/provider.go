@@ -30,6 +30,7 @@ const (
 type Capabilities struct {
 	StructuredOutput CapabilityState `json:"structured_output"`
 	ToolCalling      CapabilityState `json:"tool_calling"`
+	ImageInput       CapabilityState `json:"image_input"`
 }
 
 type GatewayRoute struct {
@@ -212,7 +213,24 @@ func (r *Registry) Model(ctx context.Context, p profile.Profile, reference strin
 	if err != nil {
 		return nil, profile.Model{}, fmt.Errorf("create %s model %s: %w", p.Gateway, spec.Name, err)
 	}
-	return instance, spec, nil
+	return &capabilityAwareModel{
+		base: instance, registry: r, gateway: p.Gateway, spec: spec,
+	}, spec, nil
+}
+
+func (r *Registry) markImageUnsupported(gatewayID string, spec profile.Model) {
+	identity := selectionIdentity(strings.ToLower(strings.TrimSpace(gatewayID)), spec)
+	r.mu.Lock()
+	value := r.capabilities[identity]
+	if value.StructuredOutput == "" {
+		value.StructuredOutput = CapabilityUnknown
+	}
+	if value.ToolCalling == "" {
+		value.ToolCalling = CapabilityUnknown
+	}
+	value.ImageInput = CapabilityUnsupported
+	r.capabilities[identity] = value
+	r.mu.Unlock()
 }
 
 func (r *Registry) Catalog(ctx context.Context, name string) ([]CatalogModel, error) {
@@ -228,7 +246,16 @@ func (r *Registry) Catalog(ctx context.Context, name string) ([]CatalogModel, er
 	}
 	r.mu.Lock()
 	for _, item := range models {
-		r.capabilities[CatalogIdentity(item)] = item.Capabilities
+		identity := CatalogIdentity(item)
+		observed := r.capabilities[identity]
+		// A catalog that says Unknown carries no evidence capable of erasing
+		// an explicit rejection already observed on this authenticated route.
+		if item.Capabilities.ImageInput == "" || item.Capabilities.ImageInput == CapabilityUnknown {
+			if observed.ImageInput == CapabilityUnsupported {
+				item.Capabilities.ImageInput = CapabilityUnsupported
+			}
+		}
+		r.capabilities[identity] = item.Capabilities
 	}
 	r.mu.Unlock()
 	return models, nil
@@ -238,6 +265,7 @@ func (r *Registry) Capabilities(gatewayID string, spec profile.Model) Capabiliti
 	unknown := Capabilities{
 		StructuredOutput: CapabilityUnknown,
 		ToolCalling:      CapabilityUnknown,
+		ImageInput:       CapabilityUnknown,
 	}
 	r.mu.RLock()
 	gatewayID = strings.ToLower(strings.TrimSpace(gatewayID))
@@ -251,6 +279,9 @@ func (r *Registry) Capabilities(gatewayID string, spec profile.Model) Capabiliti
 		if catalogValue.ToolCalling == "" {
 			catalogValue.ToolCalling = CapabilityUnknown
 		}
+		if catalogValue.ImageInput == "" {
+			catalogValue.ImageInput = CapabilityUnknown
+		}
 		return catalogValue
 	}
 	source, ok := gateway.(CapabilitySource)
@@ -263,6 +294,9 @@ func (r *Registry) Capabilities(gatewayID string, spec profile.Model) Capabiliti
 	}
 	if value.ToolCalling == "" {
 		value.ToolCalling = CapabilityUnknown
+	}
+	if value.ImageInput == "" {
+		value.ImageInput = CapabilityUnknown
 	}
 	return value
 }

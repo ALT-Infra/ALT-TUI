@@ -1360,9 +1360,9 @@ License source: https://github.com/cloudwego/base64x/blob/v0.1.6/LICENSE
    limitations under the License.
 
 
-GO MODULE: github.com/cloudwego/eino v0.9.13
+GO MODULE: github.com/cloudwego/eino v0.9.14-0.20260722035527-ca0441ac0bce
 License classification: Apache-2.0
-License source: https://github.com/cloudwego/eino/blob/v0.9.13/LICENSE-APACHE
+License source: https://github.com/cloudwego/eino/blob/ca0441ac0bce/LICENSE-APACHE
                                  Apache License
                            Version 2.0, January 2004
                         http://www.apache.org/licenses/
@@ -5565,6 +5565,9 @@ Source: https://github.com/brendanzab/codespan
 color 0.3.3
 License: Apache-2.0 OR MIT
 Source: https://github.com/linebender/color
+color_quant 1.1.0
+License: MIT
+Source: https://github.com/image-rs/color_quant.git
 concurrent-queue 2.5.0
 License: Apache-2.0 OR MIT
 Source: https://github.com/smol-rs/concurrent-queue
@@ -5697,6 +5700,9 @@ Source: https://codeberg.org/swsnr/gethostname.rs.git
 getrandom 0.3.4
 License: MIT OR Apache-2.0
 Source: https://github.com/rust-random/getrandom
+gif 0.14.2
+License: MIT OR Apache-2.0
+Source: https://github.com/image-rs/image-gif
 glow 0.17.0
 License: MIT OR Apache-2.0 OR Zlib
 Source: https://github.com/grovesNL/glow
@@ -5826,6 +5832,9 @@ Source: https://github.com/dimforge/nalgebra
 nohash-hasher 0.2.0
 License: Apache-2.0 OR MIT
 Source: https://github.com/paritytech/nohash-hasher
+nom 8.0.0
+License: MIT
+Source: https://github.com/rust-bakery/nom
 num-complex 0.4.6
 License: MIT OR Apache-2.0
 Source: https://github.com/rust-num/num-complex
@@ -5847,6 +5856,9 @@ Source: https://github.com/reem/rust-ordered-float
 ordered-stream 0.2.0
 License: MIT OR Apache-2.0
 Source: https://github.com/danieldg/ordered-stream
+os_pipe 1.2.3
+License: MIT
+Source: https://github.com/oconnor663/os_pipe.rs
 owned_ttf_parser 0.25.1
 License: Apache-2.0
 Source: https://github.com/alexheretic/owned-ttf-parser
@@ -6093,6 +6105,9 @@ Source: https://github.com/tokio-rs/tracing
 tracing-core 0.1.36
 License: MIT
 Source: https://github.com/tokio-rs/tracing
+tree_magic_mini 3.2.2
+License: MIT
+Source: https://github.com/mbrubeck/tree_magic/
 ttf-parser 0.25.1
 License: MIT OR Apache-2.0
 Source: https://github.com/harfbuzz/ttf-parser
@@ -6168,6 +6183,9 @@ Source: https://github.com/daxpedda/web-time
 webbrowser 1.2.2
 License: MIT OR Apache-2.0
 Source: https://github.com/amodm/webbrowser-rs
+weezl 0.1.12
+License: MIT OR Apache-2.0
+Source: https://github.com/image-rs/weezl
 wgpu 29.0.4
 License: MIT OR Apache-2.0
 Source: https://github.com/gfx-rs/wgpu
@@ -6195,6 +6213,9 @@ Source: https://github.com/rust-windowing/winit
 winnow 1.0.4
 License: MIT
 Source: https://github.com/winnow-rs/winnow
+wl-clipboard-rs 0.9.3
+License: MIT OR Apache-2.0
+Source: https://github.com/YaLTeR/wl-clipboard-rs
 writeable 0.6.3
 License: Unicode-3.0
 Source: https://github.com/unicode-org/icu4x
@@ -6264,6 +6285,12 @@ Source: https://github.com/unicode-org/icu4x
 zmij 1.0.23
 License: MIT
 Source: https://github.com/dtolnay/zmij
+zune-core 0.5.1
+License: MIT OR Apache-2.0 OR Zlib
+Source: https://github.com/etemesi254/zune-image
+zune-jpeg 0.5.15
+License: MIT OR Apache-2.0 OR Zlib
+Source: https://github.com/etemesi254/zune-image/tree/dev/crates/zune-jpeg
 zvariant 5.13.1
 License: MIT
 Source: https://github.com/z-galaxy/zbus/
@@ -8178,6 +8205,8 @@ Apache License 2.0 (Apache-2.0)
 Used by:
 - codespan-reporting 0.13.1
 - self_cell 1.3.0
+- zune-core 0.5.1
+- zune-jpeg 0.5.15
 
                                  Apache License
                            Version 2.0, January 2004
@@ -10039,6 +10068,8 @@ limitations under the License.
 Apache License 2.0 (Apache-2.0)
 Used by:
 - async-recursion 1.1.1
+- gif 0.14.2
+- weezl 0.1.12
 
                               Apache License
                         Version 2.0, January 2004
@@ -10318,6 +10349,7 @@ Used by:
 - url 2.5.8
 - uuid 1.24.0
 - version_check 0.9.5
+- wl-clipboard-rs 0.9.3
 
                               Apache License
                         Version 2.0, January 2004
@@ -12889,6 +12921,32 @@ THIS SOFTWARE.
 
 MIT License (MIT)
 Used by:
+- nom 8.0.0
+
+Copyright (c) 2014-2019 Geoffroy Couprie
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+&quot;Software&quot;), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+MIT License (MIT)
+Used by:
 - wayland-backend 0.3.16
 - wayland-client 0.31.15
 - wayland-cursor 0.31.14
@@ -13242,6 +13300,33 @@ THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRES
 
 MIT License (MIT)
 Used by:
+- tree_magic_mini 3.2.2
+
+MIT License
+
+Copyright (c) 2017 Aaron Hancock
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the &quot;Software&quot;), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+MIT License (MIT)
+Used by:
 - cfg_aliases 0.2.2
 
 MIT License
@@ -13478,6 +13563,33 @@ THE SOFTWARE.
 
 MIT License (MIT)
 Used by:
+- color_quant 1.1.0
+
+The MIT License (MIT)
+
+Copyright (c) 2016 PistonDevelopers
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the &quot;Software&quot;), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+MIT License (MIT)
+Used by:
 - xkbcommon-dl 0.4.2
 
 The MIT License (MIT)
@@ -13528,6 +13640,31 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+
+MIT License (MIT)
+Used by:
+- os_pipe 1.2.3
+
+The MIT License (MIT)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the &quot;Software&quot;), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 
 
 MIT License (MIT)

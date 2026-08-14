@@ -39,6 +39,12 @@ Running `alt` opens the terminal interface. ALT starts without a selected Team a
 
 The Team surface and execution graph are floating native windows launched by the same executable. One Team window switches among creation, editing, and read-only inspection while preserving the graph as the common object. Authoring publishes validated revisions. The execution graph consumes the ordered events already stored for recovery; it is a projection of runtime state, not a second orchestration authority.
 
+### Rich input
+
+`Ctrl+V` attaches an image from the desktop clipboard; pasting the path of a local PNG, JPEG, or GIF does the same. The composer inserts an atomic `[Image #N]` marker at the cursor, accepts image-only prompts, and detaches an image when its marker is removed. The original bytes are committed transactionally to SQLite with the user event, identified by SHA-256, and materialized as a verified private evidence file when an assignment needs tool access.
+
+The current request image is offered directly to the Router and accountable Lead unless the authenticated catalog explicitly marks that model as image-input unsupported; unknown capability remains unknown and ALT attempts delivery rather than deleting content. Every recipient also receives the immutable reference and readable path. The Lead may include selected attachment references in an authorized stateless call or stateful peer round. A text-only model can therefore use an available OCR or filesystem tool, ask a permitted collaborator, or report the limitation; the graph controls who may collaborate, not whether the image survives. Compaction retains the reference, digest, and path while the original bytes remain in the artifact store, avoiding repeated base64 growth.
+
 ## Gateways and model identity
 
 ALT integrates with multi-model inference gateways rather than requiring one credential for every model laboratory. The currently registered gateways are ClinePass, OpenCode, ZenMux, Together, and Fireworks. Each adapter owns authentication, catalog discovery, endpoint rules, capability evidence, exact model references, and execution for its service. ClinePass uses Cline account device authorization and rotating account tokens; ALT implements that public protocol directly and does not depend on the Cline program.

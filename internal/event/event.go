@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"altv1/internal/content"
+
 	"github.com/google/uuid"
 )
 
@@ -103,11 +105,13 @@ func Decode[T any](e Event) (T, error) {
 }
 
 type SessionCreatedData struct {
-	Task string `json:"task"`
+	Task  string        `json:"task"`
+	Input content.Input `json:"input,omitempty"`
 }
 
 type UserInstructionData struct {
-	Text string `json:"text"`
+	Text  string        `json:"text"`
+	Input content.Input `json:"input,omitempty"`
 }
 
 type ProfilePinnedData struct {
@@ -144,6 +148,7 @@ type PeerTurnSpec struct {
 	PeerID          string   `json:"peer_id"`
 	Objective       string   `json:"objective"`
 	Context         string   `json:"context,omitempty"`
+	Attachments     []string `json:"attachments,omitempty"`
 	RequiredTools   []string `json:"required_tools,omitempty"`
 	Round           int      `json:"round"`
 }
@@ -184,6 +189,7 @@ type DelegationSpec struct {
 	MemberID      string   `json:"member_id"`
 	Objective     string   `json:"objective"`
 	Context       string   `json:"context,omitempty"`
+	Attachments   []string `json:"attachments,omitempty"`
 	DependsOn     []string `json:"depends_on,omitempty"`
 	RequiredTools []string `json:"required_tools,omitempty"`
 	Depth         int      `json:"depth"`

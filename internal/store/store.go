@@ -178,7 +178,25 @@ func (s *Store) initialize(ctx context.Context) error {
 			FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 		)`,
 		`CREATE INDEX IF NOT EXISTS events_session_kind
-			ON events(session_id, kind, sequence)`,
+				ON events(session_id, kind, sequence)`,
+		`CREATE TABLE IF NOT EXISTS artifacts (
+				reference TEXT PRIMARY KEY,
+				session_id TEXT NOT NULL,
+				kind TEXT NOT NULL,
+				mime_type TEXT NOT NULL,
+				name TEXT NOT NULL DEFAULT '',
+				digest TEXT NOT NULL,
+				byte_count INTEGER NOT NULL,
+				width INTEGER NOT NULL DEFAULT 0,
+				height INTEGER NOT NULL DEFAULT 0,
+				content BLOB NOT NULL,
+				created_at TEXT NOT NULL,
+				FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+			)`,
+		`CREATE INDEX IF NOT EXISTS artifacts_session
+				ON artifacts(session_id, created_at)`,
+		`CREATE INDEX IF NOT EXISTS artifacts_digest
+				ON artifacts(digest)`,
 		`CREATE TABLE IF NOT EXISTS context_records (
 			id TEXT PRIMARY KEY,
 			session_id TEXT NOT NULL,

@@ -288,6 +288,14 @@ func (r *sessionRuntime) route(ctx context.Context) error {
 		return err
 	}
 	system, user := routerMessages(r.profile, r.session.Task, r.conversationHistory)
+	state, err := r.projection(ctx)
+	if err != nil {
+		return err
+	}
+	userMessage, err := r.richUserMessage(ctx, r.profile.Router.Model, user, projectionAttachmentReferences(state))
+	if err != nil {
+		return err
+	}
 	sourceThrough, err := r.store.LastSequence(ctx, r.session.ID)
 	if err != nil {
 		return err
@@ -295,9 +303,9 @@ func (r *sessionRuntime) route(ctx context.Context) error {
 	if _, err := r.commitWorkingView(ctx, "router", "router", sourceThrough, user); err != nil {
 		return err
 	}
-	decision, err := generateStructured[RouterDecision](
+	decision, err := generateStructuredMessage[RouterDecision](
 		ctx, r.session.ID, r.store, r.providers, r.profile,
-		r.profile.Router.Model, "router", system, user,
+		r.profile.Router.Model, "router", system, userMessage,
 		func(decision RouterDecision) error {
 			if _, ok := r.profile.Lead(decision.LeadID); !ok {
 				return fmt.Errorf("selected ineligible Lead %q", decision.LeadID)
@@ -391,10 +399,15 @@ func (r *sessionRuntime) decideLead(ctx context.Context, signals []Signal) (Lead
 		return LeadDecision{}, err
 	}
 	system, user := leadMessages(r.profile, lead, state, signals)
+	attachmentReferences := projectionAttachmentReferences(state)
+	userMessage, err := r.richUserMessage(ctx, lead.Model, user, attachmentReferences)
+	if err != nil {
+		return LeadDecision{}, err
+	}
 	if _, err := r.commitWorkingView(ctx, "lead", lead.ID, state.LastSequence, user); err != nil {
 		return LeadDecision{}, err
 	}
-	decision, err := r.generateLeadDecisionWithTools(ctx, lead, turn, system, user, state.WorkCount() == 0, func(decision LeadDecision) error {
+	decision, err := r.generateLeadDecisionWithTools(ctx, lead, turn, system, user, userMessage, attachmentReferences, state.WorkCount() == 0, func(decision LeadDecision) error {
 		if strings.TrimSpace(decision.Assessment) == "" {
 			return fmt.Errorf("assessment is empty")
 		}
@@ -537,6 +550,10 @@ func (r *sessionRuntime) materializePeerTurns(
 		if strings.TrimSpace(proposal.Objective) == "" {
 			return nil, fmt.Errorf("peer turn %s has an empty objective", key)
 		}
+		attachments, err := validateAttachmentSelection(state, proposal.Attachments)
+		if err != nil {
+			return nil, fmt.Errorf("peer turn %s: %w", key, err)
+		}
 		collaborationID := strings.TrimSpace(proposal.CollaborationID)
 		if collaborationID == "" {
 			id, err := uuid.NewV7()
@@ -559,8 +576,9 @@ func (r *sessionRuntime) materializePeerTurns(
 		spec := event.PeerTurnSpec{
 			ID: id.String(), Key: key, CollaborationID: collaborationID,
 			PeerID: peer.ID, Objective: strings.TrimSpace(proposal.Objective),
-			Context: strings.TrimSpace(proposal.Context),
-			Round:   current.round + 1,
+			Context:     strings.TrimSpace(proposal.Context),
+			Attachments: attachments,
+			Round:       current.round + 1,
 		}
 		usedCollaborations[collaborationID] = true
 		known[collaborationID] = collaboration{peerID: peer.ID, round: spec.Round, active: true}
@@ -594,6 +612,10 @@ func (r *sessionRuntime) materializeDelegations(
 		if strings.TrimSpace(proposal.Objective) == "" {
 			return nil, fmt.Errorf("delegation %s has an empty objective", proposal.Key)
 		}
+		attachments, err := validateAttachmentSelection(state, proposal.Attachments)
+		if err != nil {
+			return nil, fmt.Errorf("delegation %s: %w", proposal.Key, err)
+		}
 		id, err := uuid.NewV7()
 		if err != nil {
 			return nil, fmt.Errorf("create delegation id: %w", err)
@@ -615,13 +637,14 @@ func (r *sessionRuntime) materializeDelegations(
 			}
 		}
 		spec := event.DelegationSpec{
-			ID:        id.String(),
-			Key:       proposal.Key,
-			MemberID:  proposal.MemberID,
-			Objective: strings.TrimSpace(proposal.Objective),
-			Context:   strings.TrimSpace(proposal.Context),
-			DependsOn: dependencies,
-			Depth:     depth,
+			ID:          id.String(),
+			Key:         proposal.Key,
+			MemberID:    proposal.MemberID,
+			Objective:   strings.TrimSpace(proposal.Objective),
+			Context:     strings.TrimSpace(proposal.Context),
+			Attachments: attachments,
+			DependsOn:   dependencies,
+			Depth:       depth,
 		}
 		keys[proposal.Key] = spec.ID
 		known[spec.ID] = spec
@@ -805,6 +828,10 @@ func (r *sessionRuntime) generateFinal(ctx context.Context, lead profile.LeadAss
 	}
 	chat = r.observeModel(lead.Model, "final:"+lead.ID)(chat)
 	system, user := finalMessages(r.profile, lead, state, brief)
+	userMessage, err := r.richUserMessage(ctx, lead.Model, user, projectionAttachmentReferences(state))
+	if err != nil {
+		return err
+	}
 	if _, err := r.commitWorkingView(ctx, "final", lead.ID, state.LastSequence, user); err != nil {
 		return err
 	}
@@ -827,7 +854,7 @@ func (r *sessionRuntime) generateFinal(ctx context.Context, lead profile.LeadAss
 	})
 	iterator := runner.Run(
 		ctx,
-		[]*schema.Message{schema.UserMessage(user)},
+		[]*schema.Message{userMessage},
 		adk.WithCheckPointID("final:"+r.session.ID),
 	)
 	var answer string
@@ -918,6 +945,20 @@ func (r *sessionRuntime) generateFinal(ctx context.Context, lead profile.LeadAss
 		Data: event.FinalCompletedData{Answer: answer},
 	})
 	return err
+}
+
+func validateAttachmentSelection(state *Projection, requested []string) ([]string, error) {
+	available := make(map[string]bool)
+	for _, reference := range projectionAttachmentReferences(state) {
+		available[reference] = true
+	}
+	selected := uniqueStrings(requested)
+	for _, reference := range selected {
+		if !available[reference] {
+			return nil, fmt.Errorf("attachment %s is not available in this conversation turn", reference)
+		}
+	}
+	return selected, nil
 }
 
 func (r *sessionRuntime) markInterruptedDelegations(ctx context.Context) error {

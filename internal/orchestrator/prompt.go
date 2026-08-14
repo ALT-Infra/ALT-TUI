@@ -71,6 +71,7 @@ Return only JSON:
       "member_id": "permitted member id",
       "objective": "self-contained bounded task",
       "context": "only context needed beyond the supplied state",
+	  "attachments": ["immutable attachment references needed for this call"],
       "depends_on": ["existing delegation id or an earlier key in this decision"]
     }
   ],
@@ -80,7 +81,8 @@ Return only JSON:
       "peer_id": "permitted peer id",
       "collaboration_id": "existing collaboration id to continue, or empty to begin",
       "objective": "the next concrete contribution sought from the peer",
-      "context": "new context for this round"
+	  "context": "new context for this round",
+	  "attachments": ["immutable attachment references needed for this round"]
     }
   ],
   "cancel": ["active delegation ids no longer useful"],
@@ -99,6 +101,11 @@ member definition, the objective and context you author for that call, and a
 runtime tool catalogue it may discover as needed. A dependency controls scheduling only;
 its result is not transmitted to a later member. If later work needs earlier
 evidence, curate the relevant evidence into that call's context.
+
+Attachments are also explicit per call. The current state lists immutable
+attachment references. Include only the references a member needs in that
+delegation or peer turn. This does not grant authority: it only transmits the
+selected evidence through the already-authorized graph edge.
 
 Peer work is different. A peer relationship permits iterative collaboration
 with that contributor while this Lead remains solely accountable. Start a new
@@ -150,6 +157,7 @@ objective.`
 		"archived_evidence":       archivedEvidence,
 		"new_signals":             signals,
 		"lead_turn":               state.LeadTurns + 1,
+		"available_attachments":   projectionAttachmentReferences(state),
 	}
 	encoded, _ := json.MarshalIndent(payload, "", "  ")
 	return system, "CURRENT SESSION STATE:\n" + string(encoded)

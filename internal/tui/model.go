@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"altv1/internal/application"
+	"altv1/internal/content"
 	"altv1/internal/event"
 	"altv1/internal/nativegui"
 	"altv1/internal/orchestrator"
@@ -25,42 +26,44 @@ import (
 )
 
 type Model struct {
-	ctx                context.Context
-	app                *application.Application
-	profile            *profile.Document
-	input              textarea.Model
-	viewport           viewport.Model
-	width              int
-	height             int
-	sessionID          string
-	conversationID     string
-	workspace          string
-	starting           bool
-	status             string
-	composerNotice     string
-	turns              []turnView
-	currentTurn        int
-	run                *orchestrator.Run
-	events             <-chan event.Event
-	unsubscribe        func()
-	picker             *list.Model
-	pickerPage         *pickerPageState
-	pickerGeneration   uint64
-	profilePicker      bool
-	teamGUI            *nativeProcess
-	thinkingGUI        *nativeProcess
-	slashPopup         *list.Model
-	history            promptHistory
-	queued             []string
-	optimisticSteers   []string
-	pendingSteers      []string
-	shortcuts          bool
-	transcriptExpanded bool
-	darkBackground     bool
-	background         color.Color
-	focused            bool
-	selection          screenSelection
-	selectionBlocks    []selectionBlock
+	ctx                 context.Context
+	app                 *application.Application
+	profile             *profile.Document
+	input               textarea.Model
+	viewport            viewport.Model
+	width               int
+	height              int
+	sessionID           string
+	conversationID      string
+	workspace           string
+	starting            bool
+	status              string
+	composerNotice      string
+	turns               []turnView
+	currentTurn         int
+	run                 *orchestrator.Run
+	events              <-chan event.Event
+	unsubscribe         func()
+	picker              *list.Model
+	pickerPage          *pickerPageState
+	pickerGeneration    uint64
+	profilePicker       bool
+	teamGUI             *nativeProcess
+	thinkingGUI         *nativeProcess
+	slashPopup          *list.Model
+	history             promptHistory
+	queued              []string
+	queuedInputs        []content.Payload
+	composerAttachments []content.Artifact
+	optimisticSteers    []string
+	pendingSteers       []string
+	shortcuts           bool
+	transcriptExpanded  bool
+	darkBackground      bool
+	background          color.Color
+	focused             bool
+	selection           screenSelection
+	selectionBlocks     []selectionBlock
 
 	transcriptRevision int
 	renderedRevision   int
@@ -101,8 +104,9 @@ type promptLookupMsg struct {
 	err    error
 }
 type steerRejectedMsg struct {
-	prompt string
-	err    error
+	prompt  string
+	payload content.Payload
+	err     error
 }
 
 type profileSelectedMsg struct {
@@ -183,12 +187,12 @@ func NewWithOptions(ctx context.Context, app *application.Application, options L
 		model.status = "resuming"
 		model.startupCmd = resolveConversationCmd(ctx, app, resumeSession)
 		if initialPrompt != "" {
-			model.queued = append(model.queued, initialPrompt)
+			model.appendQueued(content.TextPayload(initialPrompt))
 		}
 	} else if options.ResumePicker {
 		model.startupCmd = model.openPagedPicker("session", "Resume a previous session")
 		if initialPrompt != "" {
-			model.queued = append(model.queued, initialPrompt)
+			model.appendQueued(content.TextPayload(initialPrompt))
 		}
 	} else if initialPrompt != "" {
 		model.input.SetValue(initialPrompt)
@@ -236,6 +240,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.slashPopup.SetSize(max(30, msg.Width-6), min(8, max(3, len(m.slashPopup.Items())+1)))
 		}
 		m.touchTranscript(false)
+	case tea.PasteMsg:
+		if m.picker == nil && !m.shortcuts && m.attachImagePathFromPaste(msg.Content) {
+			return m, nil
+		}
 	case tea.KeyPressMsg:
 		if m.selection.active {
 			switch msg.String() {
@@ -349,6 +357,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		switch msg.String() {
+		case "ctrl+v", "ctrl+alt+v":
+			m.status = "reading image from clipboard"
+			return m, readClipboardImageCmd()
 		case "ctrl+c":
 			if m.active() {
 				return m, cancelSessionCmd(m.ctx, m.app, m.sessionID)
@@ -490,6 +501,15 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.updateLayout()
 			return m, tea.Batch(cmd, m.maybeLoadNextPickerPage())
 		}
+	case clipboardImageMsg:
+		if !msg.found {
+			m.status = "clipboard does not contain an image"
+			return m, nil
+		}
+		if err := m.attachImage(msg.data, "clipboard.png"); err != nil {
+			m.status = "image paste: " + err.Error()
+		}
+		return m, nil
 	case sessionStartedMsg:
 		if msg.profile != nil {
 			m.profile = msg.profile
@@ -536,10 +556,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		notify := m.notificationCmd(msg.event)
 		if msg.event.Kind == event.FinalCompleted && len(m.queued) > 0 {
-			next := m.queued[0]
-			m.queued = append([]string(nil), m.queued[1:]...)
+			next, payload, _ := m.popQueued()
 			m.beginTurn(next)
-			return m, continueSessionCmd(m.ctx, m.app, m.sessionID, next)
+			return m, continueSessionCmd(m.ctx, m.app, m.sessionID, payload)
 		}
 		if (msg.event.Kind == event.SessionFailed ||
 			msg.event.Kind == event.SessionCancelled) &&
@@ -651,7 +670,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case steerRejectedMsg:
 		m.optimisticSteers = removeFirst(m.optimisticSteers, msg.prompt)
 		m.pendingSteers = removeFirst(m.pendingSteers, msg.prompt)
-		m.queued = append([]string{msg.prompt}, m.queued...)
+		m.prependQueued(msg.prompt, msg.payload)
 		m.status = "Lead could not be steered; message queued for the next turn: " + msg.err.Error()
 		m.touchTranscript(true)
 	case errorMsg:
@@ -1094,6 +1113,8 @@ func (m *Model) resetSessionView() {
 	m.turns = nil
 	m.currentTurn = -1
 	m.queued = nil
+	m.queuedInputs = nil
+	m.composerAttachments = nil
 	m.optimisticSteers = nil
 	m.pendingSteers = nil
 	m.transcriptExpanded = false
@@ -1101,9 +1122,9 @@ func (m *Model) resetSessionView() {
 	m.renderedRevision = -1
 }
 
-func startSessionCmd(ctx context.Context, app *application.Application, document *profile.Document, task string) tea.Cmd {
+func startSessionCmd(ctx context.Context, app *application.Application, document *profile.Document, payload content.Payload) tea.Cmd {
 	return func() tea.Msg {
-		run, err := app.Engine.Start(ctx, document, task)
+		run, err := app.Engine.StartInput(ctx, document, payload)
 		if err != nil {
 			return errorMsg{err}
 		}
@@ -1121,10 +1142,10 @@ func continueSessionCmd(
 	ctx context.Context,
 	app *application.Application,
 	previousSessionID string,
-	task string,
+	payload content.Payload,
 ) tea.Cmd {
 	return func() tea.Msg {
-		run, err := app.Engine.Continue(ctx, previousSessionID, task)
+		run, err := app.Engine.ContinueInput(ctx, previousSessionID, payload)
 		if err != nil {
 			return errorMsg{err}
 		}

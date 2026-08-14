@@ -9,3 +9,7 @@ func runNative(_ uint64) int {
 func wakeNative(_ uint64) bool {
 	return false
 }
+
+func ClipboardImage() ([]byte, bool) {
+	return nil, false
+}

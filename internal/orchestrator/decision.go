@@ -17,19 +17,21 @@ type LeadDecision struct {
 }
 
 type ProposedPeerTurn struct {
-	Key             string `json:"key"`
-	PeerID          string `json:"peer_id"`
-	CollaborationID string `json:"collaboration_id"`
-	Objective       string `json:"objective"`
-	Context         string `json:"context"`
+	Key             string   `json:"key"`
+	PeerID          string   `json:"peer_id"`
+	CollaborationID string   `json:"collaboration_id"`
+	Objective       string   `json:"objective"`
+	Context         string   `json:"context"`
+	Attachments     []string `json:"attachments"`
 }
 
 type ProposedDelegation struct {
-	Key       string   `json:"key"`
-	MemberID  string   `json:"member_id"`
-	Objective string   `json:"objective"`
-	Context   string   `json:"context"`
-	DependsOn []string `json:"depends_on"`
+	Key         string   `json:"key"`
+	MemberID    string   `json:"member_id"`
+	Objective   string   `json:"objective"`
+	Context     string   `json:"context"`
+	Attachments []string `json:"attachments"`
+	DependsOn   []string `json:"depends_on"`
 }
 
 type MemberResult struct {

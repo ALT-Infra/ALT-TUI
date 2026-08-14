@@ -120,6 +120,7 @@ func OpenAtWithOptions(ctx context.Context, dataDir string, options Options) (*A
 				DangerouslyBypassApprovalsAndSandbox: options.DangerouslyBypassApprovalsAndSandbox,
 				SensitiveEnvironment:                 sensitiveEnvironment,
 				ContextArchiveRoot:                   filepath.Join(dataDir, "context"),
+				ArtifactRoot:                         filepath.Join(dataDir, "attachments"),
 				ResolveResearchProvider:              func(callCtx context.Context) (string, error) { return app.ResolveResearchProvider(callCtx) },
 				ResolveExaCredential:                 func() (string, error) { return credentials.Resolve("exa", "EXA_API_KEY") },
 				ResolveLinkupCredential:              func() (string, error) { return credentials.Resolve("linkup", "LINKUP_API_KEY") },

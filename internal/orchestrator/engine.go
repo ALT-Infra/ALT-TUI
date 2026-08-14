@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"altv1/internal/content"
 	"altv1/internal/event"
 	"altv1/internal/profile"
 	"altv1/internal/provider"
@@ -28,6 +29,7 @@ type EngineOptions struct {
 	DangerouslyBypassApprovalsAndSandbox bool
 	SensitiveEnvironment                 []string
 	ContextArchiveRoot                   string
+	ArtifactRoot                         string
 	ResolveResearchProvider              func(context.Context) (string, error)
 	ResolveExaCredential                 func() (string, error)
 	ResolveLinkupCredential              func() (string, error)
@@ -71,13 +73,30 @@ func (e *Engine) Start(ctx context.Context, document *profile.Document, task str
 	return e.StartAt(ctx, document, task, workspace)
 }
 
+func (e *Engine) StartInput(ctx context.Context, document *profile.Document, payload content.Payload) (*Run, error) {
+	workspace, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("resolve session workspace: %w", err)
+	}
+	return e.StartInputAt(ctx, document, payload, workspace)
+}
+
 func (e *Engine) StartAt(
 	ctx context.Context,
 	document *profile.Document,
 	task string,
 	workspace string,
 ) (*Run, error) {
-	if task == "" {
+	return e.StartInputAt(ctx, document, content.TextPayload(task), workspace)
+}
+
+func (e *Engine) StartInputAt(
+	ctx context.Context,
+	document *profile.Document,
+	payload content.Payload,
+	workspace string,
+) (*Run, error) {
+	if payload.Input.Empty() {
 		return nil, fmt.Errorf("task cannot be empty")
 	}
 	workspace, err := filepath.Abs(workspace)
@@ -97,7 +116,7 @@ func (e *Engine) StartAt(
 	if err := e.store.ImportProfile(ctx, document); err != nil {
 		return nil, err
 	}
-	session, err := e.store.CreateSession(ctx, document, task, workspace)
+	session, err := e.store.CreateSessionInput(ctx, document, payload, workspace)
 	if err != nil {
 		return nil, err
 	}
@@ -129,8 +148,11 @@ func (e *Engine) Resume(ctx context.Context, sessionID string) (*Run, error) {
 // conversation. Each turn keeps its own event stream while sharing the
 // conversation's pinned Team Profile, workspace, title, and transcript.
 func (e *Engine) Continue(ctx context.Context, previousSessionID, task string) (*Run, error) {
-	task = strings.TrimSpace(task)
-	if task == "" {
+	return e.ContinueInput(ctx, previousSessionID, content.TextPayload(task))
+}
+
+func (e *Engine) ContinueInput(ctx context.Context, previousSessionID string, payload content.Payload) (*Run, error) {
+	if payload.Input.Empty() {
 		return nil, fmt.Errorf("task cannot be empty")
 	}
 	previous, err := e.store.Session(ctx, previousSessionID)
@@ -150,7 +172,7 @@ func (e *Engine) Continue(ctx context.Context, previousSessionID, task string) (
 	if err := e.providers.ValidateProfile(ctx, document.Profile); err != nil {
 		return nil, err
 	}
-	session, err := e.store.CreateContinuation(ctx, previousSessionID, document, task)
+	session, err := e.store.CreateContinuationInput(ctx, previousSessionID, document, payload)
 	if err != nil {
 		return nil, err
 	}
@@ -203,10 +225,14 @@ func (e *Engine) startSession(ctx context.Context, session *store.Session, docum
 }
 
 func (e *Engine) Steer(ctx context.Context, sessionID, instruction string) error {
-	instruction = strings.TrimSpace(instruction)
-	if instruction == "" {
+	return e.SteerInput(ctx, sessionID, content.TextPayload(instruction))
+}
+
+func (e *Engine) SteerInput(ctx context.Context, sessionID string, payload content.Payload) error {
+	if payload.Input.Empty() {
 		return fmt.Errorf("instruction cannot be empty")
 	}
+	instruction := strings.TrimSpace(payload.Input.DisplayText())
 	e.mu.Lock()
 	run := e.runs[sessionID]
 	e.mu.Unlock()
@@ -216,11 +242,11 @@ func (e *Engine) Steer(ctx context.Context, sessionID, instruction string) error
 	if run.finalizing.Load() {
 		return fmt.Errorf("the Lead is already finalizing")
 	}
-	item, err := e.store.Append(ctx, sessionID, event.Draft{
+	item, err := e.store.AppendInput(ctx, sessionID, event.Draft{
 		Kind:  event.UserInstruction,
 		Actor: "user",
-		Data:  event.UserInstructionData{Text: instruction},
-	})
+		Data:  event.UserInstructionData{Text: instruction, Input: payload.Input},
+	}, payload.Artifacts)
 	if err != nil {
 		return err
 	}

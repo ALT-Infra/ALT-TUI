@@ -10,6 +10,7 @@ package nativegui
 
 int32_t alt_native_gui_run(uint64_t handle);
 uint8_t alt_native_gui_wake(uint64_t handle);
+int64_t alt_native_gui_clipboard_image(uint8_t *buffer, size_t capacity);
 */
 import "C"
 
@@ -30,6 +31,27 @@ func runNative(handle uint64) int {
 
 func wakeNative(handle uint64) bool {
 	return C.alt_native_gui_wake(C.uint64_t(handle)) != 0
+}
+
+// ClipboardImage uses the Rust desktop integration already embedded for
+// ALT's native graph window. Returned bytes are normalized PNG.
+func ClipboardImage() ([]byte, bool) {
+	required := int64(C.alt_native_gui_clipboard_image(nil, 0))
+	if required >= 0 {
+		return nil, false
+	}
+	length := int(-required)
+	if length <= 0 {
+		return nil, false
+	}
+	buffer := make([]byte, length)
+	written := int64(C.alt_native_gui_clipboard_image(
+		(*C.uint8_t)(unsafe.Pointer(&buffer[0])), C.size_t(len(buffer)),
+	))
+	if written != int64(len(buffer)) {
+		return nil, false
+	}
+	return buffer, true
 }
 
 //export alt_gui_host_exchange

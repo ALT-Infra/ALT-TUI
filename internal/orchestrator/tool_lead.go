@@ -20,10 +20,12 @@ func (r *sessionRuntime) generateLeadDecisionWithTools(
 	turn int,
 	system string,
 	user string,
+	userMessage *schema.Message,
+	attachmentReferences []string,
 	allowUnstructuredFinalization bool,
 	validate func(LeadDecision) error,
 ) (LeadDecision, error) {
-	messages := []*schema.Message{schema.UserMessage(user)}
+	messages := []*schema.Message{userMessage}
 	strategies := []string{"initial", "explicit-correction"}
 	var invalid error
 	var invalidCandidate string
@@ -146,10 +148,14 @@ This is the tool-free coordination transition after the Lead's tool-work phase.
 Use the supplied completion report as evidence. Do not redo the work, do not
 answer the user, and return only the required JSON decision.`
 			transitionUser := user + "\n\nLEAD TOOL-WORK COMPLETION REPORT:\n" + candidate
-			decision, transitionErr := generateStructured[LeadDecision](
+			transitionMessage, messageErr := r.richUserMessage(ctx, lead.Model, transitionUser, attachmentReferences)
+			if messageErr != nil {
+				return LeadDecision{}, messageErr
+			}
+			decision, transitionErr := generateStructuredMessage[LeadDecision](
 				ctx, r.session.ID, r.store, r.providers, r.profile,
 				lead.Model, "lead:"+lead.ID+":transition",
-				transitionSystem, transitionUser, validate,
+				transitionSystem, transitionMessage, validate,
 				r.observeModel(lead.Model, "lead:"+lead.ID+":transition"),
 			)
 			if transitionErr == nil {

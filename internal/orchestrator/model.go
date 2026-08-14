@@ -39,6 +39,25 @@ func generateStructured[T any](
 	validate func(T) error,
 	prepare func(model.BaseChatModel) model.BaseChatModel,
 ) (T, error) {
+	return generateStructuredMessage(
+		ctx, sessionID, ledger, registry, p, modelReference, purpose,
+		system, schema.UserMessage(user), validate, prepare,
+	)
+}
+
+func generateStructuredMessage[T any](
+	ctx context.Context,
+	sessionID string,
+	ledger *store.Store,
+	registry *provider.Registry,
+	p profile.Profile,
+	modelReference string,
+	purpose string,
+	system string,
+	user *schema.Message,
+	validate func(T) error,
+	prepare func(model.BaseChatModel) model.BaseChatModel,
+) (T, error) {
 	var zero T
 	chat, spec, err := registry.Model(ctx, p, modelReference, provider.Structured)
 	if err != nil {
@@ -47,7 +66,10 @@ func generateStructured[T any](
 	if prepare != nil {
 		chat = prepare(chat)
 	}
-	messages := []*schema.Message{schema.SystemMessage(system), schema.UserMessage(user)}
+	if user == nil {
+		return zero, fmt.Errorf("%s user message is required", purpose)
+	}
+	messages := []*schema.Message{schema.SystemMessage(system), user}
 	response, err := chat.Generate(ctx, messages)
 	if err != nil {
 		return zero, err

@@ -127,3 +127,36 @@ func TestRepeatedAgentCompactionFormsAddressableChainInsteadOfSummaryErosion(t *
 		t.Fatal("second bounded view did not replace growth with the newest exact address")
 	}
 }
+
+func TestAgentCompactionArchivesAttachmentAddressWithoutDuplicatingBinary(t *testing.T) {
+	var archived []byte
+	runtime, err := NewRuntimeWithOptions(context.Background(), t.TempDir(), RuntimeOptions{
+		ContextArchiveDirectory: t.TempDir(),
+		ArchiveToolOutput: func(_ context.Context, _, _ string, content []byte) error {
+			archived = append([]byte(nil), content...)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	encoded := strings.Repeat("sensitive-image-base64", 100)
+	messages := []*schema.Message{{Role: schema.User, UserInputMultiContent: []schema.MessageInputPart{
+		{Type: schema.ChatMessagePartTypeText, Text: "path /durable/image.png"},
+		{Type: schema.ChatMessagePartTypeImageURL, Extra: map[string]any{
+			"alt_artifact_reference": "artifact:immutable",
+		}, Image: &schema.MessageInputImage{MessagePartCommon: schema.MessagePartCommon{
+			Base64Data: &encoded, MIMEType: "image/png",
+		}}},
+	}}}
+	if _, err := runtime.archiveAgentTranscript(context.Background(), "lead:test", messages); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(archived, []byte("sensitive-image-base64")) {
+		t.Fatal("compaction archive duplicated immutable attachment bytes")
+	}
+	if !bytes.Contains(archived, []byte("artifact:immutable")) || !bytes.Contains(archived, []byte("/durable/image.png")) {
+		t.Fatal("compaction archive lost the exact attachment address")
+	}
+}

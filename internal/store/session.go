@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"altv1/internal/content"
 	"altv1/internal/event"
 	"altv1/internal/profile"
 
@@ -83,7 +84,16 @@ func (s *Store) CreateSession(
 	task string,
 	workspace string,
 ) (*Session, error) {
-	return s.createSession(ctx, document, task, workspace, "", "")
+	return s.CreateSessionInput(ctx, document, content.TextPayload(task), workspace)
+}
+
+func (s *Store) CreateSessionInput(
+	ctx context.Context,
+	document *profile.Document,
+	payload content.Payload,
+	workspace string,
+) (*Session, error) {
+	return s.createSession(ctx, document, payload, workspace, "", "")
 }
 
 // CreateContinuation creates another orchestration turn in the same durable
@@ -94,6 +104,15 @@ func (s *Store) CreateContinuation(
 	previousSessionID string,
 	document *profile.Document,
 	task string,
+) (*Session, error) {
+	return s.CreateContinuationInput(ctx, previousSessionID, document, content.TextPayload(task))
+}
+
+func (s *Store) CreateContinuationInput(
+	ctx context.Context,
+	previousSessionID string,
+	document *profile.Document,
+	payload content.Payload,
 ) (*Session, error) {
 	previous, err := s.Session(ctx, previousSessionID)
 	if err != nil {
@@ -108,7 +127,7 @@ func (s *Store) CreateContinuation(
 		return nil, fmt.Errorf("continuation Team Profile does not match the pinned profile")
 	}
 	return s.createSession(
-		ctx, document, task, previous.Workspace,
+		ctx, document, payload, previous.Workspace,
 		previous.ConversationID, previous.Title,
 	)
 }
@@ -116,11 +135,18 @@ func (s *Store) CreateContinuation(
 func (s *Store) createSession(
 	ctx context.Context,
 	document *profile.Document,
-	task string,
+	payload content.Payload,
 	workspace string,
 	conversationID string,
 	title string,
 ) (*Session, error) {
+	if err := payload.Validate(); err != nil {
+		return nil, fmt.Errorf("validate rich input: %w", err)
+	}
+	if payload.Input.Empty() {
+		return nil, fmt.Errorf("task cannot be empty")
+	}
+	task := strings.TrimSpace(payload.Input.DisplayText())
 	id, err := uuid.NewV7()
 	if err != nil {
 		return nil, fmt.Errorf("create session id: %w", err)
@@ -175,12 +201,15 @@ func (s *Store) createSession(
 		return nil, fmt.Errorf("insert session: %w", err)
 	}
 	drafts := []event.Draft{
-		{Kind: event.SessionCreated, Actor: "user", Data: event.SessionCreatedData{Task: task}},
+		{Kind: event.SessionCreated, Actor: "user", Data: event.SessionCreatedData{Task: task, Input: payload.Input}},
 		{Kind: event.ProfilePinned, Actor: "system", Data: event.ProfilePinnedData{
 			ProfileID: document.Profile.ID,
 			Revision:  document.Profile.Revision,
 			Digest:    document.Digest,
 		}},
+	}
+	if err := insertArtifacts(ctx, tx, session.ID, payload.Artifacts, now); err != nil {
+		return nil, err
 	}
 	materialized := make([]event.Event, 0, len(drafts))
 	for i, draft := range drafts {

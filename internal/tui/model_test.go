@@ -1,9 +1,14 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"image"
 	"image/color"
+	"image/png"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -11,6 +16,7 @@ import (
 	"time"
 
 	"altv1/internal/application"
+	"altv1/internal/content"
 	"altv1/internal/event"
 	"altv1/internal/nativegui"
 	"altv1/internal/profile"
@@ -20,6 +26,68 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 )
+
+func TestComposerImagePlaceholderIsOrderedAndDeletingItDetachesEvidence(t *testing.T) {
+	imageValue := image.NewRGBA(image.Rect(0, 0, 2, 3))
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, imageValue); err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := content.NewImage(encoded.Bytes(), "clipboard.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := composerPayload("Compare [Image #1] carefully.", []content.Artifact{artifact})
+	if got := payload.Input.DisplayText(); got != "Compare [Image #1] carefully." {
+		t.Fatalf("display = %q", got)
+	}
+	if len(payload.Artifacts) != 1 || len(payload.Input.AttachmentRefs()) != 1 {
+		t.Fatalf("payload did not retain image: %#v", payload)
+	}
+	detached := composerPayload("Compare carefully.", []content.Artifact{artifact})
+	if len(detached.Artifacts) != 0 || len(detached.Input.AttachmentRefs()) != 0 {
+		t.Fatalf("deleted placeholder retained hidden evidence: %#v", detached)
+	}
+}
+
+func TestClipboardImageCanBeTheEntireSubmittedPrompt(t *testing.T) {
+	model, closeApp := testModel(t)
+	defer closeApp()
+	imageValue := image.NewRGBA(image.Rect(0, 0, 2, 3))
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, imageValue); err != nil {
+		t.Fatal(err)
+	}
+	updated, _ := model.Update(clipboardImageMsg{data: encoded.Bytes(), found: true})
+	model = updated.(Model)
+	if model.input.Value() != "[Image #1] " || len(model.composerAttachments) != 1 {
+		t.Fatalf("clipboard attachment = input %q artifacts %d", model.input.Value(), len(model.composerAttachments))
+	}
+	updated, command := model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	model = updated.(Model)
+	if command == nil || len(model.turns) != 1 || len(model.turns[0].prompts) != 1 || model.turns[0].prompts[0] != "[Image #1]" {
+		t.Fatalf("image-only submission = command %v turns %#v", command != nil, model.turns)
+	}
+}
+
+func TestPastedImagePathAttachesInsteadOfInsertingFilesystemText(t *testing.T) {
+	model, closeApp := testModel(t)
+	defer closeApp()
+	imageValue := image.NewRGBA(image.Rect(0, 0, 4, 5))
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, imageValue); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "visual evidence.png")
+	if err := os.WriteFile(path, encoded.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	updated, _ := model.Update(tea.PasteMsg{Content: path})
+	model = updated.(Model)
+	if model.input.Value() != "[Image #1] " || len(model.composerAttachments) != 1 || model.composerAttachments[0].Name != "visual evidence.png" {
+		t.Fatalf("path paste = input %q artifacts %#v", model.input.Value(), model.composerAttachments)
+	}
+}
 
 func TestEnterSubmitsAndKeepsUserPromptVisible(t *testing.T) {
 	model, closeApp := testModel(t)

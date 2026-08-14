@@ -9,8 +9,10 @@ crate-type = ["staticlib"]
 
 [dependencies]
 alt-graph-physics = { git = "https://github.com/ALT-Infra/alt-physics", rev = "0c481d9" }
+arboard = { version = "3.6.1", features = ["wayland-data-control"] }
 eframe = { version = "=0.34.3", default-features = true }
 egui_graph = { git = "https://github.com/ALT-Infra/egui_graph", rev = "dd997e3" }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 

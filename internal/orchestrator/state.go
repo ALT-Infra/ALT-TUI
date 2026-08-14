@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 
+	"altv1/internal/content"
 	"altv1/internal/event"
 	"altv1/internal/store"
 )
@@ -59,9 +60,11 @@ type PeerTurn struct {
 type Projection struct {
 	SessionID                 string
 	Task                      string
+	TaskInput                 content.Input
 	TaskReference             string
 	ConversationHistory       []ConversationTurn
 	UserInstructions          []string
+	UserInstructionInputs     []content.Input
 	UserInstructionReferences []string
 	UserInstructionsArchived  int
 	ObservableTrace           []ConversationTrace
@@ -128,6 +131,10 @@ func (p *Projection) Apply(item event.Event) error {
 			return err
 		}
 		p.Task = data.Task
+		p.TaskInput = data.Input
+		if p.TaskInput.Empty() && data.Task != "" {
+			p.TaskInput = content.Text(data.Task)
+		}
 		p.TaskReference = store.ContextReferenceForEvent(item)
 	case event.UserInstruction:
 		data, err := event.Decode[event.UserInstructionData](item)
@@ -135,10 +142,16 @@ func (p *Projection) Apply(item event.Event) error {
 			return err
 		}
 		p.UserInstructions = append(p.UserInstructions, data.Text)
+		input := data.Input
+		if input.Empty() && data.Text != "" {
+			input = content.Text(data.Text)
+		}
+		p.UserInstructionInputs = append(p.UserInstructionInputs, input)
 		p.UserInstructionReferences = append(p.UserInstructionReferences, store.ContextReferenceForEvent(item))
 		if len(p.UserInstructions) > projectionInstructionLimit {
 			remove := len(p.UserInstructions) - projectionInstructionLimit
 			p.UserInstructions = append([]string(nil), p.UserInstructions[remove:]...)
+			p.UserInstructionInputs = append([]content.Input(nil), p.UserInstructionInputs[remove:]...)
 			p.UserInstructionReferences = append([]string(nil), p.UserInstructionReferences[remove:]...)
 			p.UserInstructionsArchived += remove
 		}

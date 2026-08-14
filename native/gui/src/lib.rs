@@ -12,6 +12,66 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+static CLIPBOARD_IMAGE: LazyLock<Mutex<Option<Vec<u8>>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+fn clipboard_image_as_png() -> Option<Vec<u8>> {
+    let mut clipboard = arboard::Clipboard::new().ok()?;
+    let dynamic = clipboard
+        .get()
+        .file_list()
+        .ok()
+        .unwrap_or_default()
+        .into_iter()
+        .find_map(|path| image::open(path).ok())
+        .or_else(|| {
+            let value = clipboard.get_image().ok()?;
+            let rgba = image::RgbaImage::from_raw(
+                value.width as u32,
+                value.height as u32,
+                value.bytes.into_owned(),
+            )?;
+            Some(image::DynamicImage::ImageRgba8(rgba))
+        })?;
+    let mut encoded = Vec::new();
+    dynamic
+        .write_to(
+            &mut std::io::Cursor::new(&mut encoded),
+            image::ImageFormat::Png,
+        )
+        .ok()?;
+    Some(encoded)
+}
+
+/// Read an image from the desktop clipboard and normalize it to PNG. The
+/// first call uses a null buffer and returns the required length negatively;
+/// the second copies the exact snapshot captured by that first call.
+#[no_mangle]
+pub extern "C" fn alt_native_gui_clipboard_image(buffer: *mut u8, capacity: usize) -> i64 {
+    let mut pending = match CLIPBOARD_IMAGE.lock() {
+        Ok(value) => value,
+        Err(_) => return 0,
+    };
+    if buffer.is_null() || capacity == 0 {
+        *pending = clipboard_image_as_png();
+        return pending
+            .as_ref()
+            .map(|bytes| -(bytes.len() as i64))
+            .unwrap_or(0);
+    }
+    let Some(bytes) = pending.as_ref() else {
+        return 0;
+    };
+    if capacity < bytes.len() {
+        return -(bytes.len() as i64);
+    }
+    // SAFETY: the Go caller supplies a writable buffer of capacity bytes.
+    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer, bytes.len()) };
+    let length = bytes.len() as i64;
+    *pending = None;
+    length
+}
+
 type EdgeEndpoint = (NodeId, usize);
 type EdgeEndpointPair = (EdgeEndpoint, EdgeEndpoint);
 

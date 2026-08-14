@@ -106,6 +106,14 @@ func (r *sessionRuntime) runPeerMember(
 		return "", err
 	}
 	system, user := peerMessages(r.profile, peer, turn, history)
+	attachmentReferences := append([]string(nil), turn.Spec.Attachments...)
+	for _, earlier := range history {
+		attachmentReferences = append(attachmentReferences, earlier.Spec.Attachments...)
+	}
+	userMessage, err := r.richUserMessage(ctx, peer.Model, user, uniqueStrings(attachmentReferences))
+	if err != nil {
+		return "", err
+	}
 	if _, err := r.commitWorkingView(ctx, "peer", turn.Spec.CollaborationID, sourceThrough, user); err != nil {
 		return "", err
 	}
@@ -118,7 +126,7 @@ func (r *sessionRuntime) runPeerMember(
 		return "", fmt.Errorf("create Eino peer agent: %w", err)
 	}
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent, EnableStreaming: true, CheckPointStore: r.store})
-	iterator := runner.Run(ctx, []*schema.Message{schema.UserMessage(user)}, adk.WithCheckPointID(fmt.Sprintf("peer:%s:%s:%d:%d", r.session.ID, turn.Spec.CollaborationID, turn.Spec.Round, attempt)))
+	iterator := runner.Run(ctx, []*schema.Message{userMessage}, adk.WithCheckPointID(fmt.Sprintf("peer:%s:%s:%d:%d", r.session.ID, turn.Spec.CollaborationID, turn.Spec.Round, attempt)))
 	var finalCandidate string
 	for {
 		item, ok := iterator.Next()

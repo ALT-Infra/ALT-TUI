@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"altv1/internal/application"
+	"altv1/internal/content"
 	"altv1/internal/event"
 	"altv1/internal/store"
 
@@ -17,12 +18,15 @@ import (
 
 func (m Model) submit(queue bool) (tea.Model, tea.Cmd) {
 	value := strings.TrimSpace(m.input.Value())
-	if value == "" {
+	payload := composerPayload(m.input.Value(), m.composerAttachments)
+	if payload.Input.Empty() {
 		return m, nil
 	}
+	display := payloadDisplay(payload)
 
-	if strings.HasPrefix(value, "/") {
+	if strings.HasPrefix(value, "/") && len(payload.Artifacts) == 0 {
 		m.input.Reset()
+		m.composerAttachments = nil
 		m.slashPopup = nil
 		m.history.record(value)
 		m.updateLayout()
@@ -36,36 +40,37 @@ func (m Model) submit(queue bool) (tea.Model, tea.Cmd) {
 	}
 	m.composerNotice = ""
 	m.input.Reset()
+	m.composerAttachments = nil
 	m.slashPopup = nil
 	m.history.record(value)
 	m.updateLayout()
 	if m.starting {
-		m.queued = append(m.queued, value)
+		m.appendQueued(payload)
 		m.status = fmt.Sprintf("queued while session starts · %d waiting", len(m.queued))
 		m.touchTranscript(true)
 		return m, nil
 	}
 	if m.active() {
 		if queue {
-			m.queued = append(m.queued, value)
+			m.appendQueued(payload)
 			m.status = fmt.Sprintf("queued · %d waiting", len(m.queued))
 			m.touchTranscript(true)
 			return m, nil
 		}
 		m.status = "steering the active Lead"
 		if current := m.current(); current != nil {
-			current.prompts = append(current.prompts, value)
-			m.optimisticSteers = append(m.optimisticSteers, value)
-			m.pendingSteers = append(m.pendingSteers, value)
+			current.prompts = append(current.prompts, display)
+			m.optimisticSteers = append(m.optimisticSteers, display)
+			m.pendingSteers = append(m.pendingSteers, display)
 			m.touchTranscript(true)
 		}
-		return m, steerSessionCmd(m.ctx, m.app, m.sessionID, value)
+		return m, steerSessionCmd(m.ctx, m.app, m.sessionID, payload)
 	}
-	m.beginTurn(value)
+	m.beginTurn(display)
 	if m.sessionID != "" {
-		return m, continueSessionCmd(m.ctx, m.app, m.sessionID, value)
+		return m, continueSessionCmd(m.ctx, m.app, m.sessionID, payload)
 	}
-	return m, startSessionCmd(m.ctx, m.app, m.profile, value)
+	return m, startSessionCmd(m.ctx, m.app, m.profile, payload)
 }
 
 func (m Model) acceptSlashSelection() (tea.Model, tea.Cmd) {
@@ -96,9 +101,12 @@ func (m *Model) editLastQueued() bool {
 		return false
 	}
 	lastIndex := len(m.queued) - 1
+	m.ensureQueuedInputs()
 	m.input.SetValue(m.queued[lastIndex])
+	m.composerAttachments = append([]content.Artifact(nil), m.queuedInputs[lastIndex].Artifacts...)
 	m.input.CursorEnd()
 	m.queued = append([]string(nil), m.queued[:lastIndex]...)
+	m.queuedInputs = append([]content.Payload(nil), m.queuedInputs[:lastIndex]...)
 	m.status = "last queued prompt restored for editing"
 	m.touchTranscript(true)
 	m.updateLayout()
@@ -109,23 +117,15 @@ func (m *Model) restoreQueuedDraft() {
 	if len(m.queued) == 0 {
 		return
 	}
-	var draft string
-	if len(m.queued) == 1 {
-		draft = m.queued[0]
-	} else {
-		var merged strings.Builder
-		for index, prompt := range m.queued {
-			if index > 0 {
-				merged.WriteString("\n\n")
-			}
-			fmt.Fprintf(&merged, "[Queued message %d]\n%s", index+1, prompt)
-		}
-		draft = merged.String()
-	}
+	m.ensureQueuedInputs()
+	queuedPayloads := append([]content.Payload(nil), m.queuedInputs...)
 	if existing := strings.TrimSpace(m.input.Value()); existing != "" {
-		draft += "\n\n[Current draft]\n" + existing
+		queuedPayloads = append(queuedPayloads, composerPayload(m.input.Value(), m.composerAttachments))
 	}
+	draft, attachments := mergePayloadDrafts(queuedPayloads, len(m.queued))
 	m.queued = nil
+	m.queuedInputs = nil
+	m.composerAttachments = attachments
 	m.input.SetValue(draft)
 	m.input.CursorEnd()
 	m.input.Focus()
@@ -421,11 +421,11 @@ func steerSessionCmd(
 	ctx context.Context,
 	app *application.Application,
 	sessionID string,
-	prompt string,
+	payload content.Payload,
 ) tea.Cmd {
 	return func() tea.Msg {
-		if err := app.Engine.Steer(ctx, sessionID, prompt); err != nil {
-			return steerRejectedMsg{prompt: prompt, err: err}
+		if err := app.Engine.SteerInput(ctx, sessionID, payload); err != nil {
+			return steerRejectedMsg{prompt: payloadDisplay(payload), payload: payload, err: err}
 		}
 		return infoMsg("instruction delivered to the active Lead")
 	}

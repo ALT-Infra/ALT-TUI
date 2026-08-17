@@ -41,7 +41,7 @@ var allRuntimeTools = append(
 
 type ContextSearchInput struct {
 	Query string `json:"query" jsonschema:"description=Terms to find in exact durable evidence available to this assignment."`
-	Limit int    `json:"limit,omitempty" jsonschema:"description=Maximum matches to return; defaults to 8 and cannot exceed 25."`
+	Limit int    `json:"limit,omitempty" jsonschema:"description=Optional caller-requested result ceiling. ALT may return fewer matches to fit the selected model's live context envelope."`
 }
 
 type ContextSearchMatch struct {
@@ -55,12 +55,13 @@ type ContextSearchMatch struct {
 }
 
 type ContextSearchResult struct {
-	Matches []ContextSearchMatch `json:"matches"`
+	Matches   []ContextSearchMatch `json:"matches"`
+	Truncated bool                 `json:"truncated,omitempty"`
 }
 
 type ContextBrowseInput struct {
 	Cursor string `json:"cursor,omitempty" jsonschema:"description=Opaque next_cursor returned by the previous context_browse call; omit for newest evidence."`
-	Limit  int    `json:"limit,omitempty" jsonschema:"description=Maximum records to return; defaults to 20 and cannot exceed 50."`
+	Limit  int    `json:"limit,omitempty" jsonschema:"description=Optional caller-requested result ceiling. ALT may return fewer records to fit the selected model's live context envelope."`
 }
 
 type ContextBrowseResult struct {
@@ -264,13 +265,10 @@ func (r *Runtime) nativeTools(ctx context.Context, owner string, enabled map[str
 				if r.options.SearchContext == nil {
 					return ContextSearchResult{}, fmt.Errorf("durable context search is unavailable")
 				}
-				if input.Limit == 0 {
-					input.Limit = 8
+				if input.Limit < 0 {
+					return ContextSearchResult{}, fmt.Errorf("context search limit cannot be negative")
 				}
-				if input.Limit < 1 || input.Limit > 25 {
-					return ContextSearchResult{}, fmt.Errorf("context search limit must be within [1,25]")
-				}
-				return r.options.SearchContext(ctx, owner, input)
+				return r.searchContextForModel(ctx, owner, input)
 			},
 		)
 		if err != nil {
@@ -286,13 +284,10 @@ func (r *Runtime) nativeTools(ctx context.Context, owner string, enabled map[str
 				if r.options.BrowseContext == nil {
 					return ContextBrowseResult{}, fmt.Errorf("durable context browsing is unavailable")
 				}
-				if input.Limit == 0 {
-					input.Limit = 20
+				if input.Limit < 0 {
+					return ContextBrowseResult{}, fmt.Errorf("context browse limit cannot be negative")
 				}
-				if input.Limit < 1 || input.Limit > 50 {
-					return ContextBrowseResult{}, fmt.Errorf("context browse limit must be within [1,50]")
-				}
-				return r.options.BrowseContext(ctx, owner, input)
+				return r.browseContextForModel(ctx, owner, input)
 			},
 		)
 		if err != nil {
@@ -363,6 +358,192 @@ func (r *Runtime) nativeTools(ctx context.Context, owner string, enabled map[str
 		return r.appendLinkupTools(enabled, tools)
 	}
 	return tools, nil
+}
+
+func (r *Runtime) contextCandidateCount(owner string, requested int, emptyResult any) (int, int, bool, error) {
+	available, known := r.modelVisibleResultBytes(owner)
+	if known && available <= 0 {
+		return 0, available, true, fmt.Errorf("the current model envelope has no safe room for context results; allow ALT to compact the working trajectory and retry")
+	}
+	if !known {
+		if requested > 0 {
+			return requested, 0, false, nil
+		}
+		// With no gateway ceiling and no provider rejection yet, one result is
+		// the only non-arbitrary discovery probe. Later usage or an overflow
+		// supplies evidence for a larger route-local page.
+		return 1, 0, false, nil
+	}
+	wire, err := json.Marshal(emptyResult)
+	if err != nil {
+		return 0, available, true, fmt.Errorf("measure context result schema: %w", err)
+	}
+	perResultFloor := max(1, len(wire))
+	count := max(1, available/perResultFloor)
+	if requested > 0 {
+		count = min(count, requested)
+	}
+	return count, available, true, nil
+}
+
+func (r *Runtime) searchContextForModel(
+	ctx context.Context,
+	owner string,
+	input ContextSearchInput,
+) (ContextSearchResult, error) {
+	count, available, known, err := r.contextCandidateCount(owner, input.Limit, ContextSearchMatch{})
+	if err != nil {
+		return ContextSearchResult{}, err
+	}
+	input.Limit = count
+	result, err := r.options.SearchContext(ctx, owner, input)
+	if err != nil || !known {
+		return result, err
+	}
+	fitted := ContextSearchResult{}
+	for index, match := range result.Matches {
+		candidate := fitted
+		candidate.Matches = append(append([]ContextSearchMatch(nil), fitted.Matches...), match)
+		candidate.Truncated = index+1 < len(result.Matches)
+		wire, marshalErr := json.Marshal(candidate)
+		if marshalErr != nil {
+			return ContextSearchResult{}, fmt.Errorf("measure context search result: %w", marshalErr)
+		}
+		if len(wire) > available {
+			fitted.Truncated = true
+			break
+		}
+		fitted = candidate
+	}
+	if len(fitted.Matches) == 0 && len(result.Matches) > 0 {
+		match, fitErr := fitSearchPreview(result.Matches[0], available)
+		if fitErr != nil {
+			return ContextSearchResult{}, fitErr
+		}
+		fitted.Matches = []ContextSearchMatch{match}
+		fitted.Truncated = true
+	}
+	return fitted, nil
+}
+
+func fitSearchPreview(match ContextSearchMatch, available int) (ContextSearchMatch, error) {
+	runes := []rune(match.Preview)
+	low, high := 0, len(runes)
+	best := match
+	found := false
+	for low <= high {
+		length := low + (high-low)/2
+		candidate := match
+		candidate.Preview = string(runes[:length])
+		wire, err := json.Marshal(ContextSearchResult{Matches: []ContextSearchMatch{candidate}, Truncated: true})
+		if err != nil {
+			return ContextSearchMatch{}, fmt.Errorf("measure context search preview: %w", err)
+		}
+		if len(wire) <= available {
+			best, found = candidate, true
+			low = length + 1
+		} else {
+			high = length - 1
+		}
+	}
+	if !found {
+		return ContextSearchMatch{}, fmt.Errorf("the current model envelope cannot hold one context reference and its provenance")
+	}
+	return best, nil
+}
+
+func (r *Runtime) browseContextForModel(
+	ctx context.Context,
+	owner string,
+	input ContextBrowseInput,
+) (ContextBrowseResult, error) {
+	count, available, known, err := r.contextCandidateCount(owner, input.Limit, ContextSearchMatch{})
+	if err != nil {
+		return ContextBrowseResult{}, err
+	}
+	input.Limit = count
+	result, err := r.options.BrowseContext(ctx, owner, input)
+	if err != nil || !known {
+		return result, err
+	}
+	wire, err := json.Marshal(result)
+	if err != nil {
+		return ContextBrowseResult{}, fmt.Errorf("measure context browse result: %w", err)
+	}
+	if len(wire) <= available {
+		return result, nil
+	}
+
+	// Re-query at the exact returned count so the opaque cursor begins after
+	// the last visible record; trimming an already-fetched page would skip
+	// evidence. Serialized page size is monotone in record count.
+	low, high := 1, len(result.Records)
+	var best ContextBrowseResult
+	for low <= high {
+		middle := low + (high-low)/2
+		candidateInput := input
+		candidateInput.Limit = middle
+		candidate, candidateErr := r.options.BrowseContext(ctx, owner, candidateInput)
+		if candidateErr != nil {
+			return ContextBrowseResult{}, candidateErr
+		}
+		candidateWire, marshalErr := json.Marshal(candidate)
+		if marshalErr != nil {
+			return ContextBrowseResult{}, fmt.Errorf("measure context browse result: %w", marshalErr)
+		}
+		if len(candidateWire) <= available {
+			best = candidate
+			low = middle + 1
+		} else {
+			high = middle - 1
+		}
+	}
+	if len(best.Records) > 0 {
+		return best, nil
+	}
+	if len(result.Records) == 0 {
+		return result, nil
+	}
+	oneInput := input
+	oneInput.Limit = 1
+	one, err := r.options.BrowseContext(ctx, owner, oneInput)
+	if err != nil {
+		return ContextBrowseResult{}, err
+	}
+	match, err := fitBrowsePreview(one, available)
+	if err != nil {
+		return ContextBrowseResult{}, err
+	}
+	one.Records[0] = match
+	return one, nil
+}
+
+func fitBrowsePreview(page ContextBrowseResult, available int) (ContextSearchMatch, error) {
+	match := page.Records[0]
+	runes := []rune(match.Preview)
+	low, high := 0, len(runes)
+	best := match
+	found := false
+	for low <= high {
+		length := low + (high-low)/2
+		candidate := page
+		candidate.Records = []ContextSearchMatch{match}
+		candidate.Records[0].Preview = string(runes[:length])
+		wire, err := json.Marshal(candidate)
+		if err != nil {
+			return ContextSearchMatch{}, fmt.Errorf("measure context browse preview: %w", err)
+		}
+		if len(wire) <= available {
+			best, found = candidate.Records[0], true
+			low = length + 1
+		} else {
+			high = length - 1
+		}
+	}
+	if !found {
+		return ContextSearchMatch{}, fmt.Errorf("the current model envelope cannot hold one context reference and its browse cursor")
+	}
+	return best, nil
 }
 
 func (r *Runtime) openContextForModel(

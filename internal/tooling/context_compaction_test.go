@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -325,6 +326,74 @@ func TestExactRecallPageFitsTheCurrentModelTrajectoryRatherThanAStaticChunk(t *t
 	}
 	if result.Content != content[:result.ByteEnd] || len(requested) < 2 || requested[0] != available {
 		t.Fatalf("recall did not measure its actual serialized envelope: requests=%v result=%#v", requested, result)
+	}
+}
+
+func TestRecallCatalogFitsActualResultsWithoutSkippingTheBrowseCursor(t *testing.T) {
+	matches := make([]ContextSearchMatch, 30)
+	for index := range matches {
+		matches[index] = ContextSearchMatch{
+			Reference:      fmt.Sprintf("alt://context/records/%036d", index+1),
+			SourceSequence: int64(index + 1), Kind: "tool.completed", Actor: "engineering",
+			Preview: strings.Repeat(fmt.Sprintf("evidence-%02d ", index+1), 45),
+		}
+	}
+	var searchLimits, browseLimits []int
+	runtime, err := NewRuntimeWithOptions(context.Background(), t.TempDir(), RuntimeOptions{
+		SearchContext: func(_ context.Context, _ string, input ContextSearchInput) (ContextSearchResult, error) {
+			searchLimits = append(searchLimits, input.Limit)
+			end := min(input.Limit, len(matches))
+			return ContextSearchResult{Matches: append([]ContextSearchMatch(nil), matches[:end]...)}, nil
+		},
+		BrowseContext: func(_ context.Context, _ string, input ContextBrowseInput) (ContextBrowseResult, error) {
+			browseLimits = append(browseLimits, input.Limit)
+			end := min(input.Limit, len(matches))
+			result := ContextBrowseResult{Records: append([]ContextSearchMatch(nil), matches[:end]...)}
+			if end < len(matches) {
+				result.NextCursor = fmt.Sprintf("cursor-after-%d", end)
+			}
+			return result, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	const owner = "peer:investigator:recall-catalog"
+	budget := constrainedTestBudget(5_000)
+	runtime.setContextBudget(owner, budget)
+	plan := budget.plan([]*schema.Message{
+		schema.SystemMessage("stable investigator role"),
+		schema.UserMessage(strings.Repeat("current investigation state ", 35)),
+	}, nil)
+	available := plan.HighWater - plan.Estimated
+	search, err := runtime.searchContextForModel(context.Background(), owner, ContextSearchInput{Query: "evidence"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	searchWire, _ := json.Marshal(search)
+	if len(searchWire) > available || !search.Truncated || len(search.Matches) == 0 || len(search.Matches) >= len(matches) {
+		t.Fatalf("adaptive search page: bytes=%d available=%d matches=%d truncated=%t",
+			len(searchWire), available, len(search.Matches), search.Truncated)
+	}
+	if len(searchLimits) != 1 || searchLimits[0] == 8 || searchLimits[0] == 25 {
+		t.Fatalf("search used a legacy result literal: %v", searchLimits)
+	}
+
+	browse, err := runtime.browseContextForModel(context.Background(), owner, ContextBrowseInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	browseWire, _ := json.Marshal(browse)
+	if len(browseWire) > available || len(browse.Records) == 0 || len(browse.Records) >= len(matches) {
+		t.Fatalf("adaptive browse page: bytes=%d available=%d records=%d",
+			len(browseWire), available, len(browse.Records))
+	}
+	wantCursor := fmt.Sprintf("cursor-after-%d", len(browse.Records))
+	if browse.NextCursor != wantCursor || len(browseLimits) < 2 {
+		t.Fatalf("browse cursor skipped fitted evidence: cursor=%q want=%q calls=%v",
+			browse.NextCursor, wantCursor, browseLimits)
 	}
 }
 

@@ -257,8 +257,8 @@ func (s *Store) SearchContext(ctx context.Context, sessionID, query string, limi
 }
 
 func (s *Store) SearchContextInScope(ctx context.Context, scope ContextScope, query string, limit int) ([]ContextMatch, error) {
-	if limit <= 0 || limit > 100 {
-		return nil, fmt.Errorf("context search limit must be within [1,100]")
+	if limit <= 0 {
+		return nil, fmt.Errorf("context search limit must be positive")
 	}
 	match, err := contextMatchExpression(query)
 	if err != nil {
@@ -309,8 +309,8 @@ func (s *Store) SearchContextInScope(ctx context.Context, scope ContextScope, qu
 }
 
 func (s *Store) BrowseContextInScope(ctx context.Context, scope ContextScope, cursor string, limit int) (ContextBrowsePage, error) {
-	if limit <= 0 || limit > 100 {
-		return ContextBrowsePage{}, fmt.Errorf("context browse limit must be within [1,100]")
+	if limit <= 0 {
+		return ContextBrowsePage{}, fmt.Errorf("context browse limit must be positive")
 	}
 	predicate, args, err := contextScopePredicate(scope, "r")
 	if err != nil {
@@ -324,7 +324,11 @@ func (s *Store) BrowseContextInScope(ctx context.Context, scope ContextScope, cu
 		predicate += " AND (r.created_at < ? OR (r.created_at = ? AND r.id < ?))"
 		args = append(args, boundary.CreatedAt, boundary.CreatedAt, boundary.ID)
 	}
-	args = append(args, limit+1)
+	queryLimit := limit
+	if limit < int(^uint(0)>>1) {
+		queryLimit = limit + 1
+	}
+	args = append(args, queryLimit)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT r.id, r.session_id, r.source_sequence, r.kind, r.actor,
 		       r.correlation_id, r.content, r.created_at

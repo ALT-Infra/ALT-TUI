@@ -100,8 +100,8 @@ func (s *Store) ContextArtifactInScope(ctx context.Context, scope ContextScope, 
 }
 
 func (s *Store) SearchContextArtifactsInScope(ctx context.Context, scope ContextScope, query string, limit int) ([]ContextMatch, error) {
-	if limit <= 0 || limit > 100 {
-		return nil, fmt.Errorf("context search limit must be within [1,100]")
+	if limit <= 0 {
+		return nil, fmt.Errorf("context search limit must be positive")
 	}
 	match, err := contextMatchExpression(query)
 	if err != nil {

@@ -74,10 +74,8 @@ licenses:
 			'SHA-256: 5724ad6485dc04210a5c8c8b74e20862eece00fab510a0ca91ea44a11e6ed167' \
 			''; \
 		cat references/bubblewrap/COPYING; \
-	} > THIRD_PARTY_NOTICES.md; \
-	sed -i 's/\r$$//' THIRD_PARTY_NOTICES.md; \
-	cp THIRD_PARTY_NOTICES.md internal/licenses/THIRD_PARTY_NOTICES.txt; \
-	cmp THIRD_PARTY_NOTICES.md internal/licenses/THIRD_PARTY_NOTICES.txt
+	} > internal/licenses/THIRD_PARTY_NOTICES.txt; \
+	sed -i 's/\r$$//' internal/licenses/THIRD_PARTY_NOTICES.txt
 
 # Rebuild the single-binary Linux sandbox fallback from the pinned source clone
 # recorded in the generated notices. The checked-in asset lets ordinary ALT

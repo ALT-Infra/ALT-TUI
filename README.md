@@ -128,7 +128,7 @@ make linux VERSION=v1.0.0-rc.1
 
 `make test` runs the Go and native Rust suites. `make race` runs the Go suite with the race detector. `make linux` builds the native library and links the single Linux AMD64 executable. Release artifacts are published only after these checks pass and are explicitly marked as GitHub pre-releases until the storage and runtime contracts are declared stable.
 
-The generated [third-party notices](THIRD_PARTY_NOTICES.md) are derived from the production Go and Rust dependency graphs plus the embedded Bubblewrap source. The same notices are embedded in the executable and available through `alt licenses`. Research clones and build-only tools are not redistributed.
+The generated [third-party notices](internal/licenses/THIRD_PARTY_NOTICES.txt) are derived from the production Go and Rust dependency graphs plus the embedded Bubblewrap source. The same notices are embedded in the executable and available through `alt licenses`. Research clones and build-only tools are not redistributed.
 
 ## Non-interactive use
 

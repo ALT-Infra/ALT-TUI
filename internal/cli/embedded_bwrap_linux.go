@@ -15,7 +15,7 @@ const embeddedBubblewrapSHA256 = "5724ad6485dc04210a5c8c8b74e20862eece00fab510a0
 
 // Bubblewrap 0.12.0, built from containers/bubblewrap commit
 // 2f55bae38468d0c50cf5df87b1e481e882b63acb with generic x86-64 code
-// generation. See THIRD_PARTY_NOTICES.md.
+// generation. See internal/licenses/THIRD_PARTY_NOTICES.txt.
 //
 //go:embed assets/bwrap-linux-amd64
 var embeddedBubblewrap []byte

@@ -1,9 +1,11 @@
 /alt
+/THIRD_PARTY_NOTICES.md
 /dist/
 /.alt/
 /references/
 /native/vendor/
 /native/**/target/
+/native/gui/tests/snapshots/
 /docs/
 /NORTH_STAR.md
 *.db

@@ -37,7 +37,7 @@ func Execute(
 	var showVersion bool
 	root := &cobra.Command{
 		Use:                   "alt [OPTIONS] [PROMPT]",
-		Short:                 "Adaptive Lead-and-member orchestration",
+		Short:                 "Adaptive peer-and-specialist orchestration",
 		DisableFlagsInUseLine: true,
 		SilenceUsage:          true,
 		SilenceErrors:         true,

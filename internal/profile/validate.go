@@ -56,10 +56,6 @@ func Validate(p Profile) []Diagnostic {
 			add(Error, "models."+alias+".name", "is required")
 		}
 	}
-	if strings.TrimSpace(p.Router.Definition) == "" {
-		add(Error, "router.definition", "is required")
-	}
-	validateModelReference(&out, p, "router.model", p.Router.Model)
 
 	modelOwners := map[string]string{}
 	memberModels := map[string]string{}
@@ -77,92 +73,102 @@ func Validate(p Profile) []Diagnostic {
 		} else {
 			modelOwners[identity] = memberID
 		}
-		if identityForMember, exists := memberModels[memberID]; exists && identityForMember != identity {
+		if existing, exists := memberModels[memberID]; exists && existing != identity {
 			add(Error, path, fmt.Sprintf("member %s resolves to more than one catalog model", memberID))
 		} else {
 			memberModels[memberID] = identity
 		}
 	}
-	registerModel("router.model", "$router", p.Router.Model)
 
-	if len(p.Leads) < 2 {
-		add(Error, "leads", "ALT teams require at least two Leads")
-	}
-	leadIDs := map[string]bool{}
+	agentIDs := map[string]bool{}
 	definitions := map[string]string{}
-	for i, lead := range p.Leads {
-		path := fmt.Sprintf("leads[%d]", i)
-		validateID(&out, path+".id", lead.ID)
-		if leadIDs[lead.ID] {
-			add(Error, path+".id", "duplicates another Lead assignment")
+	agents := p.Agents()
+	for index, agent := range agents {
+		path := "primary"
+		if index > 0 {
+			path = fmt.Sprintf("peers[%d]", index-1)
 		}
-		leadIDs[lead.ID] = true
-		validateModelReference(&out, p, path+".model", lead.Model)
-		registerModel(path+".model", lead.ID, lead.Model)
-		validateDefinition(&out, path+".definition", lead.ID, lead.Definition, definitions)
+		validateID(&out, path+".id", agent.ID)
+		if agentIDs[agent.ID] {
+			add(Error, path+".id", "duplicates another leadership-capable agent")
+		}
+		agentIDs[agent.ID] = true
+		validateModelReference(&out, p, path+".model", agent.Model)
+		registerModel(path+".model", agent.ID, agent.Model)
+		validateDefinition(&out, path+".definition", agent.ID, agent.Definition, definitions)
 	}
 
-	memberIDs := map[string]bool{}
-	for i, member := range p.Members {
-		path := fmt.Sprintf("members[%d]", i)
-		validateID(&out, path+".id", member.ID)
-		if memberIDs[member.ID] || leadIDs[member.ID] {
+	specialistIDs := map[string]bool{}
+	for index, specialist := range p.Specialists {
+		path := fmt.Sprintf("specialists[%d]", index)
+		validateID(&out, path+".id", specialist.ID)
+		if specialistIDs[specialist.ID] || agentIDs[specialist.ID] {
 			add(Error, path+".id", "duplicates another Team member")
 		}
-		memberIDs[member.ID] = true
-		validateModelReference(&out, p, path+".model", member.Model)
-		registerModel(path+".model", member.ID, member.Model)
-		validateDefinition(&out, path+".definition", member.ID, member.Definition, definitions)
+		specialistIDs[specialist.ID] = true
+		validateModelReference(&out, p, path+".model", specialist.Model)
+		registerModel(path+".model", specialist.ID, specialist.Model)
+		validateDefinition(&out, path+".definition", specialist.ID, specialist.Definition, definitions)
 	}
 
-	for i, lead := range p.Leads {
-		callIDs := map[string]bool{}
-		for j, id := range lead.Calls {
-			path := fmt.Sprintf("leads[%d].calls[%d]", i, j)
-			validateID(&out, path, id)
-			if id == lead.ID {
-				add(Error, path, "a Lead cannot call itself")
+	// Peer declarations are undirected. A declaration on either endpoint grants
+	// consultation and leadership transfer in both directions; spelling the same
+	// edge on both endpoints is rejected so its durable identity is unambiguous.
+	peerEdges := map[string]string{}
+	usedSpecialists := map[string]bool{}
+	for index, agent := range agents {
+		path := "primary"
+		if index > 0 {
+			path = fmt.Sprintf("peers[%d]", index-1)
+		}
+		localPeers := map[string]bool{}
+		for peerIndex, id := range agent.Peers {
+			itemPath := fmt.Sprintf("%s.peers[%d]", path, peerIndex)
+			validateID(&out, itemPath, id)
+			if id == agent.ID {
+				add(Error, itemPath, "an agent cannot peer with itself")
 			}
-			if callIDs[id] {
-				add(Error, path, "duplicates another callable member")
+			if localPeers[id] {
+				add(Error, itemPath, "duplicates another peer relationship")
 			}
-			callIDs[id] = true
-			if leadIDs[id] {
-				add(Error, path, "references a Lead; callable specialists and Leads are exclusive roles")
-			} else if _, ok := p.Member(id); !ok {
-				add(Error, path, "references unknown specialist "+id)
+			localPeers[id] = true
+			if !agentIDs[id] {
+				add(Error, itemPath, "references unknown leadership-capable peer "+id)
+				continue
+			}
+			first, second := agent.ID, id
+			if second < first {
+				first, second = second, first
+			}
+			key := first + "\x00" + second
+			if previous, exists := peerEdges[key]; exists {
+				add(Error, itemPath, "duplicates undirected peer relationship declared at "+previous)
+			} else {
+				peerEdges[key] = itemPath
 			}
 		}
-		peerIDs := map[string]bool{}
-		for j, id := range lead.Peers {
-			path := fmt.Sprintf("leads[%d].peers[%d]", i, j)
-			validateID(&out, path, id)
-			if id == lead.ID {
-				add(Error, path, "a Lead cannot peer with itself")
+		localSpecialists := map[string]bool{}
+		for specialistIndex, id := range agent.Specialists {
+			itemPath := fmt.Sprintf("%s.specialists[%d]", path, specialistIndex)
+			validateID(&out, itemPath, id)
+			if localSpecialists[id] {
+				add(Error, itemPath, "duplicates another specialist permission")
 			}
-			if peerIDs[id] {
-				add(Error, path, "duplicates another peer relationship")
+			localSpecialists[id] = true
+			if !specialistIDs[id] {
+				if agentIDs[id] {
+					add(Error, itemPath, "references a leadership-capable agent; peers and specialists are exclusive roles")
+				} else {
+					add(Error, itemPath, "references unknown specialist "+id)
+				}
+				continue
 			}
-			peerIDs[id] = true
-			if leadIDs[id] {
-				add(Error, path, "references a Lead; peer contributors and Leads are exclusive roles")
-			} else if _, ok := p.Member(id); !ok {
-				add(Error, path, "references unknown specialist "+id)
-			}
+			usedSpecialists[id] = true
 		}
 	}
-	for id := range memberIDs {
-		used := false
-		for _, lead := range p.Leads {
-			for _, calledID := range lead.Calls {
-				used = used || calledID == id
-			}
-			for _, peerID := range lead.Peers {
-				used = used || peerID == id
-			}
-		}
-		if !used {
-			add(Warning, "members."+id, "is neither callable nor available as a peer to any Lead")
+	for id := range specialistIDs {
+		if !usedSpecialists[id] {
+			add(Warning, "specialists."+id, "is not callable by any leadership-capable agent")
 		}
 	}
 
@@ -182,11 +188,7 @@ func validateDefinition(out *[]Diagnostic, path, id, definition string, definiti
 		return
 	}
 	if other, exists := definitions[normalized]; exists {
-		*out = append(*out, Diagnostic{
-			Severity: Warning,
-			Path:     path,
-			Message:  "duplicates " + other + " after case and whitespace normalization",
-		})
+		*out = append(*out, Diagnostic{Severity: Warning, Path: path, Message: "duplicates " + other + " after case and whitespace normalization"})
 	}
 	definitions[normalized] = id
 }

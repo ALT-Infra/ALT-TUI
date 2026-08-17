@@ -97,6 +97,64 @@ func TestDeviceAuthorizationStoresRotatingAccountCredentialAndListsModels(t *tes
 	}
 }
 
+func TestDeviceAuthorizationTimingComesFromRFCAndServer(t *testing.T) {
+	t.Setenv("ALT_ALLOW_INSECURE_PROVIDER_ENDPOINT", "1")
+	var omitExpiry atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		payload := map[string]any{
+			"device_code": "device-rfc", "user_code": "RFC-CODE",
+			"verification_uri": "https://example.test/device",
+		}
+		if !omitExpiry.Load() {
+			payload["expires_in"] = 90
+		}
+		writeJSON(writer, payload)
+	}))
+	defer server.Close()
+	factory := testFactory(t, server.URL)
+	authorization, err := factory.BeginDeviceAuthorization(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authorization.ExpiresInSeconds != 90 || authorization.PollIntervalSeconds != 5 {
+		t.Fatalf("RFC/server device timing = %#v", authorization)
+	}
+	omitExpiry.Store(true)
+	if _, err := factory.BeginDeviceAuthorization(context.Background()); err == nil || !strings.Contains(err.Error(), "expires_in") {
+		t.Fatalf("missing server expiry was replaced with a client guess: %v", err)
+	}
+}
+
+func TestCredentialRefreshLeadIsDerivedFromCallerLifetime(t *testing.T) {
+	t.Setenv("ALT_ALLOW_INSECURE_PROVIDER_ENDPOINT", "1")
+	var refreshes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		refreshes.Add(1)
+		writeJSON(writer, clineTokenResponse{Success: true, Data: clineTokenData{
+			AccessToken: "unexpected-refresh", RefreshToken: "rotated",
+			ExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+		}})
+	}))
+	defer server.Close()
+	factory := testFactory(t, server.URL)
+	credentialValue, _ := json.Marshal(storedCredentials{
+		AccessToken: "still-valid", RefreshToken: "refresh-if-needed",
+		ExpiresAt: time.Now().Add(4 * time.Minute).UTC().Format(time.RFC3339),
+	})
+	if _, err := factory.Credentials.Set(Name, string(credentialValue)); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	token, err := factory.resolveAccessToken(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != "workos:still-valid" || refreshes.Load() != 0 {
+		t.Fatalf("credential was refreshed using a fixed lead window: token=%q refreshes=%d", token, refreshes.Load())
+	}
+}
+
 func TestExpiredCredentialRefreshIsSingleFlightAndPersistsRotation(t *testing.T) {
 	t.Setenv("ALT_ALLOW_INSECURE_PROVIDER_ENDPOINT", "1")
 	var refreshes atomic.Int32
@@ -162,7 +220,7 @@ func TestExpiredCredentialRefreshIsSingleFlightAndPersistsRotation(t *testing.T)
 	}
 }
 
-func TestInferenceTransportAddsClineHeadersAndUnwrapsOnlyJSONEnvelope(t *testing.T) {
+func TestInferenceTransportAddsClineHeadersWithoutRewritingLanguageResponses(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Header.Get("X-Client-Type") != "alt" || request.Header.Get("X-Task-Id") != "task-1" {
 			t.Fatalf("headers = %#v", request.Header)
@@ -188,8 +246,8 @@ func TestInferenceTransportAddsClineHeadersAndUnwrapsOnlyJSONEnvelope(t *testing
 	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload["choices"] == nil || payload["data"] != nil || payload["success"] != nil {
-		t.Fatalf("unwrapped payload = %#v", payload)
+	if payload["data"] == nil || payload["success"] == nil || payload["choices"] != nil {
+		t.Fatalf("language response was rewritten as an image envelope: %#v", payload)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -154,6 +155,32 @@ func TestFileStoreUsesWALAndPersistsWorkspace(t *testing.T) {
 	}
 }
 
+func TestSessionTitlePreservesCanonicalTextForGeometryAwareClients(t *testing.T) {
+	ctx := context.Background()
+	ledger, err := store.OpenMemory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	document := mustProfile(t)
+	if err := ledger.ImportProfile(ctx, document); err != nil {
+		t.Fatal(err)
+	}
+	task := strings.Repeat("context-bearing title segment ", 9) + "DECISIVE-SUFFIX"
+	session, err := ledger.CreateSession(ctx, document, task, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := ledger.Session(ctx, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Join(strings.Fields(task), " ")
+	if loaded.Title != want || !strings.HasSuffix(loaded.Title, "DECISIVE-SUFFIX") {
+		t.Fatalf("canonical title was clipped by storage: %q", loaded.Title)
+	}
+}
+
 func TestContinuationKeepsOneDurableConversation(t *testing.T) {
 	ctx := context.Background()
 	ledger, err := store.OpenMemory(ctx)
@@ -173,7 +200,7 @@ func TestContinuationKeepsOneDurableConversation(t *testing.T) {
 		t.Fatalf("first conversation id = %q, want session id %q", first.ConversationID, first.ID)
 	}
 	if _, err := ledger.Append(ctx, first.ID, event.Draft{
-		Kind: event.FinalCompleted, Actor: "lead",
+		Kind: event.FinalCompleted, Actor: "agent",
 		Data: event.FinalCompletedData{Answer: "first answer"},
 	}); err != nil {
 		t.Fatal(err)

@@ -24,6 +24,13 @@ type Config struct {
 	Route      string
 	BaseURL    string
 	Hostname   string
+	// PromptCacheAffinity enables a documented gateway-specific routing key.
+	// Stable request construction remains gateway-neutral; only this mapping is
+	// adapter owned.
+	PromptCacheAffinity bool
+	// ExplicitCacheControlPrefixes lists model-ID prefixes for which the
+	// gateway documents Anthropic-style cache_control content blocks.
+	ExplicitCacheControlPrefixes []string
 }
 
 // Factory implements the common authenticated OpenAI-compatible execution
@@ -76,23 +83,41 @@ func (f *Factory) NewChatModel(
 	if err != nil {
 		return nil, err
 	}
+	httpClient := f.HTTPClient
+	for _, prefix := range f.config.ExplicitCacheControlPrefixes {
+		if strings.HasPrefix(strings.ToLower(spec.Name), strings.ToLower(prefix)) {
+			httpClient = provider.ExplicitCacheControlHTTPClient(httpClient)
+			break
+		}
+	}
 	config := &einoopenai.ChatModelConfig{
 		APIKey:     key,
 		BaseURL:    f.config.BaseURL,
 		Model:      spec.Name,
-		HTTPClient: f.HTTPClient,
+		HTTPClient: provider.CacheAwareHTTPClient(httpClient),
 	}
 	// A generic OpenAI wire format does not prove that a particular model
 	// implements native structured output. ALT requests JSON in the prompt and
 	// validates the response itself unless authenticated catalog evidence says
 	// more.
 	_ = mode
+	extraFields := make(map[string]any)
 	if spec.ReasoningEffort != "" {
-		config.ExtraFields = map[string]any{
-			"reasoning_effort": spec.ReasoningEffort,
+		extraFields["reasoning_effort"] = spec.ReasoningEffort
+	}
+	if f.config.PromptCacheAffinity {
+		if key := provider.CacheAffinityKey(ctx); key != "" {
+			extraFields["prompt_cache_key"] = key
 		}
 	}
-	return einoopenai.NewChatModel(ctx, config)
+	if len(extraFields) > 0 {
+		config.ExtraFields = extraFields
+	}
+	chat, err := einoopenai.NewChatModel(ctx, config)
+	if err != nil {
+		return nil, err
+	}
+	return provider.ObserveCacheUsage(chat), nil
 }
 
 func (f *Factory) ResolveCredential() (string, error) {

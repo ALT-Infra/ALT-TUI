@@ -57,8 +57,9 @@ type Turn struct {
 	Nodes     map[string]*Node `json:"nodes"`
 	Edges     map[string]*Edge `json:"edges"`
 
-	selectedLead      string
+	currentLeader     string
 	delegationActors  map[string]string
+	workCallers       map[string]string
 	delegationEdges   map[string]string
 	delegationRunning map[string]bool
 	actorActivity     map[string]int
@@ -166,44 +167,52 @@ func newTurn(id string, ordinal int, task string, started time.Time, p profile.P
 		Nodes:             make(map[string]*Node),
 		Edges:             make(map[string]*Edge),
 		delegationActors:  make(map[string]string),
+		workCallers:       make(map[string]string),
 		delegationEdges:   make(map[string]string),
 		delegationRunning: make(map[string]bool),
 		actorActivity:     make(map[string]int),
 		toolOwners:        make(map[string]string),
 	}
 	turn.Nodes["user"] = &Node{ID: "user", Kind: "user", Label: "User", Status: Running}
-	turn.Nodes["router"] = &Node{ID: "router", Kind: "router", Label: "Router", Status: Idle}
-	turn.Edges["allowed:user:router"] = &Edge{
-		ID: "allowed:user:router", From: "user", To: "router",
+	for _, agent := range p.Agents() {
+		turn.ensureParticipant(agent.ID, "agent")
+		if agent.ID == p.Primary.ID {
+			setMetadata(turn.Nodes[memberID(agent.ID)], "primary", "true")
+		}
+	}
+	turn.Edges["allowed:user:"+p.Primary.ID] = &Edge{
+		ID: "allowed:user:" + p.Primary.ID, From: "user", To: memberID(p.Primary.ID),
 		Kind: "allowed", Direction: "outward", Status: Idle,
 	}
-	for _, lead := range p.Leads {
-		turn.ensureMember(lead.ID)
-		setMetadata(turn.Nodes[memberID(lead.ID)], "lead", "true")
-		turn.Edges["allowed:router:"+lead.ID] = &Edge{
-			ID: "allowed:router:" + lead.ID, From: "router", To: memberID(lead.ID),
-			Kind: "allowed", Direction: "outward", Status: Idle,
-		}
-		for _, calledID := range lead.Calls {
-			turn.ensureMember(calledID)
-			turn.Edges["allowed:"+lead.ID+":"+calledID] = &Edge{
-				ID:   "allowed:" + lead.ID + ":" + calledID,
-				From: memberID(lead.ID), To: memberID(calledID),
+	seenPeerEdges := make(map[string]bool)
+	for _, agent := range p.Agents() {
+		for _, specialistID := range agent.Specialists {
+			turn.ensureParticipant(specialistID, "specialist")
+			turn.Edges["allowed-specialist:"+agent.ID+":"+specialistID] = &Edge{
+				ID:   "allowed-specialist:" + agent.ID + ":" + specialistID,
+				From: memberID(agent.ID), To: memberID(specialistID),
 				Kind: "allowed", Direction: "outward", Status: Idle,
 			}
 		}
-		for _, peerID := range lead.Peers {
-			turn.ensureMember(peerID)
-			turn.Edges["allowed-peer:"+lead.ID+":"+peerID] = &Edge{
-				ID:   "allowed-peer:" + lead.ID + ":" + peerID,
-				From: memberID(lead.ID), To: memberID(peerID),
+		for _, peer := range p.PeerAgentsFor(agent) {
+			first, second := agent.ID, peer.ID
+			if second < first {
+				first, second = second, first
+			}
+			key := first + ":" + second
+			if seenPeerEdges[key] {
+				continue
+			}
+			seenPeerEdges[key] = true
+			turn.Edges["allowed-peer:"+key] = &Edge{
+				ID:   "allowed-peer:" + key,
+				From: memberID(first), To: memberID(second),
 				Kind: "allowed-peer", Direction: "bidirectional", Status: Idle,
 			}
 		}
 	}
-	for _, member := range p.Members {
-		turn.ensureMember(member.ID)
-		setMetadata(turn.Nodes[memberID(member.ID)], "member", "true")
+	for _, specialist := range p.Specialists {
+		turn.ensureParticipant(specialist.ID, "specialist")
 	}
 	return turn
 }
@@ -230,53 +239,57 @@ func (t *Turn) apply(item event.Event) error {
 			return err
 		}
 		setMetadata(t.Nodes["user"], "latest_instruction", data.Text)
-	case event.RouterStarted:
-		t.Nodes["router"].Status = Running
-		t.flow("request", "user", "router", "request", "outward", Running, item.At, 1)
-	case event.LeadSelected:
-		data, err := event.Decode[event.LeadSelectedData](item)
+	case event.LeadershipTransferred:
+		data, err := event.Decode[event.LeadershipTransferredData](item)
 		if err != nil {
 			return err
 		}
-		t.selectedLead = data.LeadID
-		t.ensureMember(data.LeadID)
-		t.Nodes["router"].Status = Completed
-		if edge := t.Edges["flow:request"]; edge != nil {
-			edge.Status = Completed
-			edge.Active = 0
+		t.currentLeader = data.ToAgentID
+		t.ensureParticipant(data.ToAgentID, "agent")
+		t.Nodes[memberID(data.ToAgentID)].Status = Running
+		if data.FromAgentID == "" {
+			t.flow("request", "user", memberID(data.ToAgentID), "request", "outward", Completed, item.At, 0)
+		} else {
+			t.ensureParticipant(data.FromAgentID, "agent")
+			if node := t.Nodes[memberID(data.FromAgentID)]; node != nil && t.actorActivity[data.FromAgentID] == 0 {
+				node.Status = Completed
+			}
+			edgeID := t.flow("handoff:"+item.ID, memberID(data.FromAgentID), memberID(data.ToAgentID), "handoff", "outward", Completed, item.At, 0)
+			setEdgeMetadata(t.Edges[edgeID], "reason", data.Reason)
 		}
-		t.Nodes[memberID(data.LeadID)].Status = Running
-		setMetadata(t.Nodes["router"], "basis", data.Basis)
-		setMetadata(t.Nodes["router"], "confidence",
-			strconv.FormatFloat(data.Confidence, 'f', 3, 64))
-		t.flow("route", "router", memberID(data.LeadID), "route", "outward", Completed, item.At, 0)
-	case event.LeadTurnStarted:
-		data, err := event.Decode[event.LeadTurnData](item)
+		setMetadata(t.Nodes[memberID(data.ToAgentID)], "leadership_reason", data.Reason)
+	case event.AgentTurnStarted:
+		data, err := event.Decode[event.AgentTurnData](item)
 		if err != nil {
 			return err
 		}
-		node := t.Nodes[memberID(t.selectedLead)]
+		t.currentLeader = data.AgentID
+		t.ensureParticipant(data.AgentID, "agent")
+		node := t.Nodes[memberID(data.AgentID)]
+		node.Status = Running
 		setMetadata(node, "decision_cycle", strconv.Itoa(data.Turn))
 		setMetadata(node, "triggering_signals", strings.Join(data.SignalKinds, ", "))
-	case event.LeadDecision:
-		data, err := event.Decode[event.LeadDecisionData](item)
+	case event.AgentDecision:
+		data, err := event.Decode[event.AgentDecisionData](item)
 		if err != nil {
 			return err
 		}
-		node := t.Nodes[memberID(t.selectedLead)]
+		node := t.Nodes[memberID(data.AgentID)]
 		setMetadata(node, "assessment", data.Assessment)
-		setMetadata(node, "will_finalize", strconv.FormatBool(data.WillFinalize))
 		setMetadata(node, "delegations_planned", strconv.Itoa(len(data.Delegations)))
+		setMetadata(node, "peer_turns_planned", strconv.Itoa(len(data.PeerTurns)))
+		setMetadata(node, "handoff_to", data.HandoffTo)
 	case event.DelegationCreated:
 		data, err := event.Decode[event.DelegationSpec](item)
 		if err != nil {
 			return err
 		}
-		t.ensureMember(data.MemberID)
-		t.delegationActors[data.ID] = data.MemberID
+		t.ensureParticipant(data.SpecialistID, "specialist")
+		t.delegationActors[data.ID] = data.SpecialistID
+		t.workCallers[data.ID] = data.CallerID
 		edgeID := t.flow(
-			"delegation:"+t.selectedLead+":"+data.MemberID,
-			memberID(t.selectedLead), memberID(data.MemberID),
+			"delegation:"+data.CallerID+":"+data.SpecialistID,
+			memberID(data.CallerID), memberID(data.SpecialistID),
 			"delegation", "outward", Queued, item.At, 0,
 		)
 		t.delegationEdges[data.ID] = edgeID
@@ -295,7 +308,7 @@ func (t *Turn) apply(item event.Event) error {
 			actor = item.Actor
 			t.delegationActors[data.DelegationID] = actor
 		}
-		t.ensureMember(actor)
+		t.ensureParticipant(actor, "specialist")
 		if !t.delegationRunning[data.DelegationID] {
 			t.delegationRunning[data.DelegationID] = true
 			t.actorActivity[actor]++
@@ -331,7 +344,8 @@ func (t *Turn) apply(item event.Event) error {
 		setMetadata(node, "result", data.Result)
 		setMetadata(node, "findings", strings.Join(data.Findings, "\n"))
 		setMetadata(node, "confidence", strconv.FormatFloat(data.Confidence, 'f', 3, 64))
-		t.flow("result:"+actor+":"+t.selectedLead, memberID(actor), memberID(t.selectedLead),
+		caller := t.delegationCaller(data.DelegationID)
+		t.flow("result:"+actor+":"+caller, memberID(actor), memberID(caller),
 			"result", "inward", Completed, item.At, 0)
 	case event.DelegationFailed:
 		data, err := event.Decode[event.DelegationFailedData](item)
@@ -340,7 +354,8 @@ func (t *Turn) apply(item event.Event) error {
 		}
 		actor := t.finishDelegation(data.DelegationID, Failed)
 		setMetadata(t.Nodes[memberID(actor)], "error", data.Error)
-		t.flow("failure:"+actor+":"+t.selectedLead, memberID(actor), memberID(t.selectedLead),
+		caller := t.delegationCaller(data.DelegationID)
+		t.flow("failure:"+actor+":"+caller, memberID(actor), memberID(caller),
 			"failure", "inward", Failed, item.At, 0)
 	case event.DelegationCancelled:
 		data, err := event.Decode[event.DelegationCancelledData](item)
@@ -354,11 +369,12 @@ func (t *Turn) apply(item event.Event) error {
 		if err != nil {
 			return err
 		}
-		t.ensureMember(data.PeerID)
+		t.ensureParticipant(data.PeerID, "agent")
 		t.delegationActors[data.ID] = data.PeerID
+		t.workCallers[data.ID] = data.CallerID
 		edgeID := t.flow(
 			"peer:"+data.CollaborationID,
-			memberID(t.selectedLead), memberID(data.PeerID),
+			memberID(data.CallerID), memberID(data.PeerID),
 			"peer", "bidirectional", Queued, item.At, 0,
 		)
 		t.delegationEdges[data.ID] = edgeID
@@ -378,7 +394,7 @@ func (t *Turn) apply(item event.Event) error {
 			actor = item.Actor
 			t.delegationActors[data.PeerTurnID] = actor
 		}
-		t.ensureMember(actor)
+		t.ensureParticipant(actor, "agent")
 		if !t.delegationRunning[data.PeerTurnID] {
 			t.delegationRunning[data.PeerTurnID] = true
 			t.actorActivity[actor]++
@@ -411,7 +427,8 @@ func (t *Turn) apply(item event.Event) error {
 		setMetadata(node, "peer_result", data.Result)
 		setMetadata(node, "findings", strings.Join(data.Findings, "\n"))
 		setMetadata(node, "confidence", strconv.FormatFloat(data.Confidence, 'f', 3, 64))
-		t.flow("peer-result:"+actor+":"+t.selectedLead, memberID(actor), memberID(t.selectedLead), "peer-result", "bidirectional", Completed, item.At, 0)
+		caller := t.peerCaller(data.PeerTurnID)
+		t.flow("peer-result:"+actor+":"+caller, memberID(actor), memberID(caller), "peer-result", "bidirectional", Completed, item.At, 0)
 	case event.PeerTurnFailed:
 		data, err := event.Decode[event.PeerTurnFailedData](item)
 		if err != nil {
@@ -472,7 +489,10 @@ func (t *Turn) apply(item event.Event) error {
 		t.flow("tool-result:"+data.ToolCallID, toolID, owner,
 			"tool-result", "inward", status, item.At, 0)
 	case event.FinalStarted:
-		t.flow("answer", memberID(t.selectedLead), "user",
+		if item.Actor != "" {
+			t.currentLeader = item.Actor
+		}
+		t.flow("answer", memberID(t.currentLeader), "user",
 			"answer", "inward", Running, item.At, 1)
 	case event.FinalTextDelta, event.FinalReasoning:
 		data, err := event.Decode[event.TextDeltaData](item)
@@ -483,7 +503,7 @@ func (t *Turn) apply(item event.Event) error {
 		if item.Kind == event.FinalReasoning {
 			key = "provider_reasoning"
 		}
-		appendMetadata(t.Nodes[memberID(t.selectedLead)], key, data.Text)
+		appendMetadata(t.Nodes[memberID(t.currentLeader)], key, data.Text)
 	case event.FinalCompleted:
 		data, err := event.Decode[event.FinalCompletedData](item)
 		if err != nil {
@@ -522,9 +542,27 @@ func (t *Turn) apply(item event.Event) error {
 		}
 		node := t.modelTarget(item.CorrelationID, data.Purpose)
 		incrementMetadata(node, "prompt_tokens", data.PromptTokens)
+		incrementMetadata(node, "uncached_prompt_tokens", data.UncachedPromptTokens)
+		incrementMetadata(node, "cached_prompt_tokens", data.CachedPromptTokens)
+		incrementMetadata(node, "cache_write_tokens", data.CacheWriteTokens)
+		incrementMetadata(node, "cache_miss_tokens", data.CacheMissTokens)
+		if data.CacheUsageReported {
+			incrementMetadata(node, "cache_usage_reports", 1)
+		}
 		incrementMetadata(node, "completion_tokens", data.CompletionTokens)
 		incrementMetadata(node, "reasoning_tokens", data.ReasoningTokens)
 		incrementMetadata(node, "total_tokens", data.TotalTokens)
+	case event.ModelCacheEpochStarted:
+		data, err := event.Decode[event.ModelCacheEpochStartedData](item)
+		if err != nil {
+			return err
+		}
+		node := t.modelTarget(item.CorrelationID, "agent:"+data.AgentID)
+		setMetadata(node, "cache_epoch", strconv.Itoa(data.Epoch))
+		setMetadata(node, "cache_epoch_reason", data.Reason)
+		setMetadata(node, "cache_header_digest", data.HeaderDigest)
+		setMetadata(node, "cache_tool_names", strings.Join(data.ToolNames, ", "))
+		setMetadata(node, "cache_deferred_tool_names", strings.Join(data.DeferredToolNames, ", "))
 	case event.ContextViewCommitted:
 		data, err := event.Decode[event.ContextViewCommittedData](item)
 		if err != nil {
@@ -591,12 +629,12 @@ func (t *Turn) terminate(status Status) {
 	}
 }
 
-func (t *Turn) ensureMember(actor string) {
+func (t *Turn) ensureParticipant(actor, kind string) {
 	id := memberID(actor)
 	if actor == "" || t.Nodes[id] != nil {
 		return
 	}
-	t.Nodes[id] = &Node{ID: id, Kind: "member", Label: actor, Status: Idle}
+	t.Nodes[id] = &Node{ID: id, Kind: kind, Label: actor, Status: Idle}
 }
 
 func (t *Turn) flow(
@@ -646,7 +684,7 @@ func (t *Turn) finishDelegation(id string, status Status) string {
 		}
 	}
 	if node := t.Nodes[memberID(actor)]; node != nil && t.actorActivity[actor] == 0 {
-		if actor != t.selectedLead {
+		if actor != t.currentLeader {
 			node.Status = status
 		}
 	}
@@ -657,7 +695,18 @@ func (t *Turn) ownerFor(delegationID string) string {
 	if actor := t.delegationActors[delegationID]; actor != "" {
 		return memberID(actor)
 	}
-	return memberID(t.selectedLead)
+	return memberID(t.currentLeader)
+}
+
+func (t *Turn) delegationCaller(id string) string {
+	if caller := t.workCallers[id]; caller != "" {
+		return caller
+	}
+	return t.currentLeader
+}
+
+func (t *Turn) peerCaller(id string) string {
+	return t.delegationCaller(id)
 }
 
 func (t *Turn) modelTarget(correlationID, purpose string) *Node {
@@ -665,28 +714,26 @@ func (t *Turn) modelTarget(correlationID, purpose string) *Node {
 		return t.Nodes[memberID(actor)]
 	}
 	switch {
-	case purpose == "router":
-		return t.Nodes["router"]
-	case strings.HasPrefix(purpose, "member:"), strings.HasPrefix(purpose, "peer:"):
+	case strings.HasPrefix(purpose, "specialist:"), strings.HasPrefix(purpose, "member:"), strings.HasPrefix(purpose, "peer:"), strings.HasPrefix(purpose, "agent:"):
 		parts := strings.Split(purpose, ":")
 		actor := ""
 		if len(parts) > 1 {
 			actor = parts[1]
 		}
-		t.ensureMember(actor)
+		kind := "agent"
+		if strings.HasPrefix(purpose, "specialist:") || strings.HasPrefix(purpose, "member:") {
+			kind = "specialist"
+		}
+		t.ensureParticipant(actor, kind)
 		return t.Nodes[memberID(actor)]
-	case strings.HasPrefix(purpose, "lead:"), strings.HasPrefix(purpose, "final:"):
-		return t.Nodes[memberID(t.selectedLead)]
 	}
 	return t.Nodes["user"]
 }
 
 func (t *Turn) contextTarget(scopeKind, scopeID string) *Node {
 	switch scopeKind {
-	case "router":
-		return t.Nodes["router"]
-	case "lead", "final":
-		return t.Nodes[memberID(t.selectedLead)]
+	case "agent":
+		return t.Nodes[memberID(scopeID)]
 	case "specialist":
 		return t.Nodes[t.ownerFor(scopeID)]
 	case "peer":

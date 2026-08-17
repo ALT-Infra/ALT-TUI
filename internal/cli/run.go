@@ -62,14 +62,14 @@ func (s *commandState) execCommand() *cobra.Command {
 			defer unsubscribe()
 			for item := range events {
 				switch item.Kind {
-				case event.LeadSelected:
+				case event.LeadershipTransferred:
 					if !quiet {
-						data, _ := event.Decode[event.LeadSelectedData](item)
-						fmt.Fprintf(s.errOut, "lead %s · %s\n", data.LeadID, data.Basis)
+						data, _ := event.Decode[event.LeadershipTransferredData](item)
+						fmt.Fprintf(s.errOut, "leader %s · %s\n", data.ToAgentID, data.Reason)
 					}
 				case event.DelegationStarted:
 					if !quiet {
-						fmt.Fprintf(s.errOut, "member %s started\n", item.Actor)
+						fmt.Fprintf(s.errOut, "specialist %s started\n", item.Actor)
 					}
 				case event.ToolCalled:
 					if !quiet {

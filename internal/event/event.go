@@ -13,41 +13,41 @@ import (
 type Kind string
 
 const (
-	SessionCreated        Kind = "session.created"
-	UserInstruction       Kind = "user.instruction"
-	ProfilePinned         Kind = "profile.pinned"
-	SessionRecovered      Kind = "session.recovered"
-	ModelCallStarted      Kind = "model.call.started"
-	ModelUsage            Kind = "model.usage"
-	ContextViewCommitted  Kind = "context.view.committed"
-	ContextAgentCompacted Kind = "context.agent.compacted"
-	RouterStarted         Kind = "router.started"
-	LeadSelected          Kind = "lead.selected"
-	LeadTurnStarted       Kind = "lead.turn.started"
-	LeadTurnCompleted     Kind = "lead.turn.completed"
-	LeadDecision          Kind = "lead.decision"
-	DelegationCreated     Kind = "delegation.created"
-	DelegationStarted     Kind = "delegation.started"
-	ToolCalled            Kind = "tool.called"
-	ToolCompleted         Kind = "tool.completed"
-	DelegationTextDelta   Kind = "delegation.text.delta"
-	DelegationReasoning   Kind = "delegation.reasoning.delta"
-	DelegationCompleted   Kind = "delegation.completed"
-	DelegationFailed      Kind = "delegation.failed"
-	DelegationCancelled   Kind = "delegation.cancelled"
-	PeerTurnCreated       Kind = "peer.turn.created"
-	PeerTurnStarted       Kind = "peer.turn.started"
-	PeerTextDelta         Kind = "peer.text.delta"
-	PeerReasoning         Kind = "peer.reasoning.delta"
-	PeerTurnCompleted     Kind = "peer.turn.completed"
-	PeerTurnFailed        Kind = "peer.turn.failed"
-	PeerTurnCancelled     Kind = "peer.turn.cancelled"
-	FinalStarted          Kind = "final.started"
-	FinalTextDelta        Kind = "final.text.delta"
-	FinalReasoning        Kind = "final.reasoning.delta"
-	FinalCompleted        Kind = "final.completed"
-	SessionFailed         Kind = "session.failed"
-	SessionCancelled      Kind = "session.cancelled"
+	SessionCreated         Kind = "session.created"
+	UserInstruction        Kind = "user.instruction"
+	ProfilePinned          Kind = "profile.pinned"
+	SessionRecovered       Kind = "session.recovered"
+	ModelCallStarted       Kind = "model.call.started"
+	ModelUsage             Kind = "model.usage"
+	ModelCacheEpochStarted Kind = "model.cache.epoch.started"
+	ContextViewCommitted   Kind = "context.view.committed"
+	ContextAgentCompacted  Kind = "context.agent.compacted"
+	LeadershipTransferred  Kind = "leadership.transferred"
+	AgentTurnStarted       Kind = "agent.turn.started"
+	AgentTurnCompleted     Kind = "agent.turn.completed"
+	AgentDecision          Kind = "agent.decision"
+	DelegationCreated      Kind = "delegation.created"
+	DelegationStarted      Kind = "delegation.started"
+	ToolCalled             Kind = "tool.called"
+	ToolCompleted          Kind = "tool.completed"
+	DelegationTextDelta    Kind = "delegation.text.delta"
+	DelegationReasoning    Kind = "delegation.reasoning.delta"
+	DelegationCompleted    Kind = "delegation.completed"
+	DelegationFailed       Kind = "delegation.failed"
+	DelegationCancelled    Kind = "delegation.cancelled"
+	PeerTurnCreated        Kind = "peer.turn.created"
+	PeerTurnStarted        Kind = "peer.turn.started"
+	PeerTextDelta          Kind = "peer.text.delta"
+	PeerReasoning          Kind = "peer.reasoning.delta"
+	PeerTurnCompleted      Kind = "peer.turn.completed"
+	PeerTurnFailed         Kind = "peer.turn.failed"
+	PeerTurnCancelled      Kind = "peer.turn.cancelled"
+	FinalStarted           Kind = "final.started"
+	FinalTextDelta         Kind = "final.text.delta"
+	FinalReasoning         Kind = "final.reasoning.delta"
+	FinalCompleted         Kind = "final.completed"
+	SessionFailed          Kind = "session.failed"
+	SessionCancelled       Kind = "session.cancelled"
 )
 
 type Event struct {
@@ -120,25 +120,27 @@ type ProfilePinnedData struct {
 	Digest    string `json:"digest"`
 }
 
-type LeadSelectedData struct {
-	LeadID     string  `json:"lead_id"`
-	Confidence float64 `json:"confidence"`
-	Basis      string  `json:"basis"`
+type LeadershipTransferredData struct {
+	FromAgentID string `json:"from_agent_id,omitempty"`
+	ToAgentID   string `json:"to_agent_id"`
+	Reason      string `json:"reason"`
 }
 
-type LeadTurnData struct {
+type AgentTurnData struct {
+	AgentID     string   `json:"agent_id"`
 	Turn        int      `json:"turn"`
 	SignalKinds []string `json:"signal_kinds,omitempty"`
 	Assessment  string   `json:"assessment,omitempty"`
 }
 
-type LeadDecisionData struct {
+type AgentDecisionData struct {
+	AgentID       string           `json:"agent_id"`
 	Turn          int              `json:"turn"`
 	Assessment    string           `json:"assessment"`
 	Delegations   []DelegationSpec `json:"delegations,omitempty"`
 	PeerTurns     []PeerTurnSpec   `json:"peer_turns,omitempty"`
 	Cancellations []string         `json:"cancellations,omitempty"`
-	WillFinalize  bool             `json:"will_finalize"`
+	HandoffTo     string           `json:"handoff_to,omitempty"`
 }
 
 type PeerTurnSpec struct {
@@ -146,6 +148,7 @@ type PeerTurnSpec struct {
 	Key             string   `json:"key,omitempty"`
 	CollaborationID string   `json:"collaboration_id"`
 	PeerID          string   `json:"peer_id"`
+	CallerID        string   `json:"caller_id"`
 	Objective       string   `json:"objective"`
 	Context         string   `json:"context,omitempty"`
 	Attachments     []string `json:"attachments,omitempty"`
@@ -186,7 +189,8 @@ type PeerTurnCancelledData struct {
 type DelegationSpec struct {
 	ID            string   `json:"id"`
 	Key           string   `json:"key,omitempty"`
-	MemberID      string   `json:"member_id"`
+	SpecialistID  string   `json:"specialist_id"`
+	CallerID      string   `json:"caller_id"`
 	Objective     string   `json:"objective"`
 	Context       string   `json:"context,omitempty"`
 	Attachments   []string `json:"attachments,omitempty"`
@@ -251,17 +255,31 @@ type FailureData struct {
 }
 
 type ModelUsageData struct {
-	Model            string `json:"model"`
-	Purpose          string `json:"purpose"`
-	PromptTokens     int    `json:"prompt_tokens"`
-	CompletionTokens int    `json:"completion_tokens"`
-	ReasoningTokens  int    `json:"reasoning_tokens"`
-	TotalTokens      int    `json:"total_tokens"`
+	Model                string `json:"model"`
+	Purpose              string `json:"purpose"`
+	PromptTokens         int    `json:"prompt_tokens"`
+	UncachedPromptTokens int    `json:"uncached_prompt_tokens,omitempty"`
+	CachedPromptTokens   int    `json:"cached_prompt_tokens,omitempty"`
+	CacheWriteTokens     int    `json:"cache_write_tokens,omitempty"`
+	CacheMissTokens      int    `json:"cache_miss_tokens,omitempty"`
+	CacheUsageReported   bool   `json:"cache_usage_reported,omitempty"`
+	CompletionTokens     int    `json:"completion_tokens"`
+	ReasoningTokens      int    `json:"reasoning_tokens"`
+	TotalTokens          int    `json:"total_tokens"`
 }
 
 type ModelCallStartedData struct {
 	Model   string `json:"model"`
 	Purpose string `json:"purpose"`
+}
+
+type ModelCacheEpochStartedData struct {
+	AgentID           string   `json:"agent_id"`
+	Epoch             int      `json:"epoch"`
+	Reason            string   `json:"reason"`
+	HeaderDigest      string   `json:"header_digest"`
+	ToolNames         []string `json:"tool_names,omitempty"`
+	DeferredToolNames []string `json:"deferred_tool_names,omitempty"`
 }
 
 type ContextViewCommittedData struct {
@@ -276,7 +294,11 @@ type ContextViewCommittedData struct {
 
 type ContextAgentCompactedData struct {
 	Scope               string `json:"scope"`
+	Trigger             string `json:"trigger,omitempty"`
 	TranscriptReference string `json:"transcript_reference"`
 	MessagesBefore      int    `json:"messages_before"`
 	MessagesAfter       int    `json:"messages_after"`
+	EstimatedTokens     int    `json:"estimated_tokens,omitempty"`
+	PromptCapacity      int    `json:"prompt_capacity,omitempty"`
+	HighWater           int    `json:"high_water,omitempty"`
 }

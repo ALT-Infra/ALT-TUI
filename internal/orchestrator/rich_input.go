@@ -65,6 +65,58 @@ func (r *sessionRuntime) richUserMessage(
 	return &schema.Message{Role: schema.User, UserInputMultiContent: parts}, nil
 }
 
+// richExactInputMessage preserves the user's authored text parts verbatim and
+// keeps images in their original positions. Dynamic Team state, role metadata,
+// and handoff information belong in the system instruction; they are never
+// concatenated into this immutable user message.
+func (r *sessionRuntime) richExactInputMessage(
+	ctx context.Context,
+	modelReference string,
+	input content.Input,
+) (*schema.Message, error) {
+	references := make([]string, 0, len(input.AttachmentRefs()))
+	for _, reference := range input.AttachmentRefs() {
+		references = append(references, reference.Reference)
+	}
+	artifacts, _, err := r.resolveArtifacts(ctx, references)
+	if err != nil {
+		return nil, err
+	}
+	byReference := make(map[string]content.Artifact, len(artifacts))
+	for _, artifact := range artifacts {
+		byReference[artifact.Reference] = artifact
+	}
+	capabilities := r.providers.Capabilities(r.profile.Gateway, r.profile.Models[modelReference])
+	parts := make([]schema.MessageInputPart, 0, len(input.Parts))
+	for _, part := range input.Parts {
+		switch part.Type {
+		case content.PartText:
+			parts = append(parts, schema.MessageInputPart{Type: schema.ChatMessagePartTypeText, Text: part.Text})
+		case content.PartAttachment:
+			if part.Attachment == nil || capabilities.ImageInput == provider.CapabilityUnsupported {
+				continue
+			}
+			artifact, ok := byReference[part.Attachment.Reference]
+			if !ok || artifact.Kind != content.ArtifactImage {
+				continue
+			}
+			encoded := base64.StdEncoding.EncodeToString(artifact.Data)
+			parts = append(parts, schema.MessageInputPart{
+				Type: schema.ChatMessagePartTypeImageURL,
+				Extra: map[string]any{
+					"alt_artifact_reference": artifact.Reference,
+					"sha256":                 artifact.Digest,
+				},
+				Image: &schema.MessageInputImage{
+					MessagePartCommon: schema.MessagePartCommon{Base64Data: &encoded, MIMEType: artifact.MIMEType},
+					Detail:            schema.ImageURLDetailAuto,
+				},
+			})
+		}
+	}
+	return &schema.Message{Role: schema.User, UserInputMultiContent: parts}, nil
+}
+
 func (r *sessionRuntime) resolveArtifacts(ctx context.Context, references []string) ([]content.Artifact, []string, error) {
 	seen := map[string]bool{}
 	artifacts := make([]content.Artifact, 0, len(references))

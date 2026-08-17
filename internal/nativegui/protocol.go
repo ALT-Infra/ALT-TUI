@@ -81,24 +81,19 @@ type Published struct {
 
 // TeamDraft is deliberately narrower than profile.Profile. It contains only
 // decisions the user owns: one gateway account, model assignments, graph
-// edges, member identities, the Team name, and verbatim definitions. Team
+// edges, participant identities, the Team name, and verbatim definitions. Team
 // identity and runtime execution policy remain product-owned;
 // gateway limits are discovered or enforced by the gateway.
 type TeamDraft struct {
-	ID           string          `json:"id"`
-	Name         string          `json:"name"`
-	Gateway      string          `json:"gateway"`
-	BaseRevision int             `json:"base_revision"`
-	Router       DraftAssignment `json:"router"`
-	Members      []DraftMember   `json:"members"`
-	RouterEdges  []string        `json:"router_edges"`
-	CallEdges    []DraftCallEdge `json:"call_edges"`
-	PeerEdges    []DraftPeerEdge `json:"peer_edges"`
-}
-
-type DraftAssignment struct {
-	Model      ModelChoice `json:"model"`
-	Definition string      `json:"definition"`
+	ID              string                `json:"id"`
+	Name            string                `json:"name"`
+	Gateway         string                `json:"gateway"`
+	BaseRevision    int                   `json:"base_revision"`
+	Primary         DraftMember           `json:"primary"`
+	Peers           []DraftMember         `json:"peers"`
+	Specialists     []DraftMember         `json:"specialists"`
+	PeerEdges       []DraftPeerEdge       `json:"peer_edges"`
+	SpecialistEdges []DraftSpecialistEdge `json:"specialist_edges"`
 }
 
 type DraftMember struct {
@@ -107,14 +102,14 @@ type DraftMember struct {
 	Definition string      `json:"definition"`
 }
 
-type DraftCallEdge struct {
-	LeadID   string `json:"lead_id"`
-	MemberID string `json:"member_id"`
+type DraftPeerEdge struct {
+	FirstAgentID  string `json:"first_agent_id"`
+	SecondAgentID string `json:"second_agent_id"`
 }
 
-type DraftPeerEdge struct {
-	LeadID   string `json:"lead_id"`
-	MemberID string `json:"member_id"`
+type DraftSpecialistEdge struct {
+	AgentID      string `json:"agent_id"`
+	SpecialistID string `json:"specialist_id"`
 }
 
 type ModelChoice struct {
@@ -124,12 +119,12 @@ type ModelChoice struct {
 
 func NewDraft() TeamDraft {
 	return TeamDraft{
-		ID:          "team-" + uuid.NewString(),
-		Router:      DraftAssignment{},
-		Members:     []DraftMember{},
-		RouterEdges: []string{},
-		CallEdges:   []DraftCallEdge{},
-		PeerEdges:   []DraftPeerEdge{},
+		ID:              "team-" + uuid.NewString(),
+		Primary:         DraftMember{ID: "primary"},
+		Peers:           []DraftMember{},
+		Specialists:     []DraftMember{},
+		PeerEdges:       []DraftPeerEdge{},
+		SpecialistEdges: []DraftSpecialistEdge{},
 	}
 }
 
@@ -139,60 +134,65 @@ func DraftFromProfile(p profile.Profile, catalog []provider.CatalogModel) TeamDr
 		Name:         p.Name,
 		Gateway:      p.Gateway,
 		BaseRevision: p.Revision,
-		Router: DraftAssignment{
-			Model:      choiceForModel(p.Gateway, p.Models[p.Router.Model], catalog),
-			Definition: p.RouterDefinition(),
+		Primary: DraftMember{
+			ID:         p.Primary.ID,
+			Model:      choiceForModel(p.Gateway, p.Models[p.Primary.Model], catalog),
+			Definition: p.AgentDefinition(p.Primary),
 		},
 	}
-	byID := make(map[string]int)
-	for _, lead := range p.Leads {
-		member := DraftMember{
-			ID:         lead.ID,
-			Model:      choiceForModel(p.Gateway, p.Models[lead.Model], catalog),
-			Definition: p.LeadDefinition(lead),
-		}
-		draft.Members = append(draft.Members, member)
-		draft.RouterEdges = append(draft.RouterEdges, lead.ID)
-		byID[lead.ID] = len(draft.Members) - 1
+	for _, peer := range p.Peers {
+		draft.Peers = append(draft.Peers, DraftMember{
+			ID:         peer.ID,
+			Model:      choiceForModel(p.Gateway, p.Models[peer.Model], catalog),
+			Definition: p.AgentDefinition(peer),
+		})
 	}
-	for _, member := range p.Members {
-		if _, ok := byID[member.ID]; !ok {
-			member := DraftMember{
-				ID:         member.ID,
-				Model:      choiceForModel(p.Gateway, p.Models[member.Model], catalog),
-				Definition: p.MemberDefinition(member),
+	for _, specialist := range p.Specialists {
+		draft.Specialists = append(draft.Specialists, DraftMember{
+			ID:         specialist.ID,
+			Model:      choiceForModel(p.Gateway, p.Models[specialist.Model], catalog),
+			Definition: p.SpecialistDefinition(specialist),
+		})
+	}
+	seenPeerEdges := make(map[string]bool)
+	for _, agent := range p.Agents() {
+		for _, peer := range p.PeerAgentsFor(agent) {
+			first, second := agent.ID, peer.ID
+			if second < first {
+				first, second = second, first
 			}
-			draft.Members = append(draft.Members, member)
-			byID[member.ID] = len(draft.Members) - 1
-		}
-	}
-	for _, lead := range p.Leads {
-		for _, memberID := range lead.Calls {
-			draft.CallEdges = append(draft.CallEdges, DraftCallEdge{
-				LeadID: lead.ID, MemberID: memberID,
-			})
-		}
-		for _, memberID := range lead.Peers {
+			key := first + "\x00" + second
+			if seenPeerEdges[key] {
+				continue
+			}
+			seenPeerEdges[key] = true
 			draft.PeerEdges = append(draft.PeerEdges, DraftPeerEdge{
-				LeadID: lead.ID, MemberID: memberID,
+				FirstAgentID: first, SecondAgentID: second,
+			})
+		}
+		for _, specialistID := range agent.Specialists {
+			draft.SpecialistEdges = append(draft.SpecialistEdges, DraftSpecialistEdge{
+				AgentID: agent.ID, SpecialistID: specialistID,
 			})
 		}
 	}
-	sort.SliceStable(draft.Members, func(i, j int) bool {
-		return draft.Members[i].ID < draft.Members[j].ID
+	sort.SliceStable(draft.Peers, func(i, j int) bool {
+		return draft.Peers[i].ID < draft.Peers[j].ID
 	})
-	sort.SliceStable(draft.CallEdges, func(i, j int) bool {
-		if draft.CallEdges[i].LeadID != draft.CallEdges[j].LeadID {
-			return draft.CallEdges[i].LeadID < draft.CallEdges[j].LeadID
-		}
-		return draft.CallEdges[i].MemberID < draft.CallEdges[j].MemberID
+	sort.SliceStable(draft.Specialists, func(i, j int) bool {
+		return draft.Specialists[i].ID < draft.Specialists[j].ID
 	})
-	sort.Strings(draft.RouterEdges)
 	sort.SliceStable(draft.PeerEdges, func(i, j int) bool {
-		if draft.PeerEdges[i].LeadID != draft.PeerEdges[j].LeadID {
-			return draft.PeerEdges[i].LeadID < draft.PeerEdges[j].LeadID
+		if draft.PeerEdges[i].FirstAgentID != draft.PeerEdges[j].FirstAgentID {
+			return draft.PeerEdges[i].FirstAgentID < draft.PeerEdges[j].FirstAgentID
 		}
-		return draft.PeerEdges[i].MemberID < draft.PeerEdges[j].MemberID
+		return draft.PeerEdges[i].SecondAgentID < draft.PeerEdges[j].SecondAgentID
+	})
+	sort.SliceStable(draft.SpecialistEdges, func(i, j int) bool {
+		if draft.SpecialistEdges[i].AgentID != draft.SpecialistEdges[j].AgentID {
+			return draft.SpecialistEdges[i].AgentID < draft.SpecialistEdges[j].AgentID
+		}
+		return draft.SpecialistEdges[i].SpecialistID < draft.SpecialistEdges[j].SpecialistID
 	})
 	return draft
 }
@@ -204,52 +204,35 @@ func (d TeamDraft) Profile() profile.Profile {
 		Name:    strings.TrimSpace(d.Name),
 		Gateway: strings.ToLower(strings.TrimSpace(d.Gateway)),
 		Models:  make(map[string]profile.Model),
-		Router: profile.RouterAssignment{
-			Model:      "router",
-			Definition: d.Router.Definition,
+		Primary: profile.AgentAssignment{
+			ID: strings.TrimSpace(d.Primary.ID), Model: strings.TrimSpace(d.Primary.ID),
+			Definition: d.Primary.Definition,
 		},
 	}
-	value.Models["router"] = d.Router.Model.profileModel()
-
-	leads := make(map[string]bool, len(d.RouterEdges))
-	for _, id := range d.RouterEdges {
-		leads[id] = true
+	if value.Primary.ID != "" {
+		value.Models[value.Primary.ID] = d.Primary.Model.profileModel()
 	}
-	for _, member := range d.Members {
-		id := strings.TrimSpace(member.ID)
+	for _, peer := range d.Peers {
+		id := strings.TrimSpace(peer.ID)
 		if id == "" {
 			continue
 		}
-		value.Models[id] = member.Model.profileModel()
-		if leads[id] {
-			value.Leads = append(value.Leads, profile.LeadAssignment{
-				ID: id, Model: id, Definition: member.Definition,
-			})
-		} else {
-			value.Members = append(value.Members, profile.MemberAssignment{
-				ID: id, Model: id, Definition: member.Definition,
-			})
-		}
+		value.Models[id] = peer.Model.profileModel()
+		value.Peers = append(value.Peers, profile.AgentAssignment{ID: id, Model: id, Definition: peer.Definition})
 	}
-	for _, edge := range d.CallEdges {
-		for index := range value.Leads {
-			if value.Leads[index].ID == edge.LeadID {
-				value.Leads[index].Calls = appendUnique(
-					value.Leads[index].Calls,
-					edge.MemberID,
-				)
-			}
+	for _, specialist := range d.Specialists {
+		id := strings.TrimSpace(specialist.ID)
+		if id == "" {
+			continue
 		}
+		value.Models[id] = specialist.Model.profileModel()
+		value.Specialists = append(value.Specialists, profile.SpecialistAssignment{ID: id, Model: id, Definition: specialist.Definition})
 	}
 	for _, edge := range d.PeerEdges {
-		for index := range value.Leads {
-			if value.Leads[index].ID == edge.LeadID {
-				value.Leads[index].Peers = appendUnique(
-					value.Leads[index].Peers,
-					edge.MemberID,
-				)
-			}
-		}
+		assignPeer(&value, edge.FirstAgentID, edge.SecondAgentID)
+	}
+	for _, edge := range d.SpecialistEdges {
+		assignSpecialist(&value, edge.AgentID, edge.SpecialistID)
 	}
 	return value
 }
@@ -267,9 +250,11 @@ func DiagnosticsForDraft(d TeamDraft, catalog []provider.CatalogModel) []Diagnos
 		return []Diagnostic{{Severity: "error", Path: "draft", Message: err.Error()}}
 	}
 	raw := mapDiagnostics(profile.Validate(document.Profile))
-	result := make([]Diagnostic, 0, len(raw)+len(d.Members)+4)
+	assignments := append([]DraftMember{d.Primary}, d.Peers...)
+	assignments = append(assignments, d.Specialists...)
+	result := make([]Diagnostic, 0, len(raw)+len(assignments)+3)
 	emptyAliases := map[string]bool{}
-	for _, member := range d.Members {
+	for _, member := range assignments {
 		if strings.TrimSpace(member.Model.ID) == "" && strings.TrimSpace(member.ID) != "" {
 			emptyAliases[strings.TrimSpace(member.ID)] = true
 		}
@@ -280,11 +265,6 @@ func DiagnosticsForDraft(d TeamDraft, catalog []provider.CatalogModel) []Diagnos
 			continue
 		case item.Path == "name":
 			item.Path = "team.name"
-		case item.Path == "leads":
-			continue
-		case strings.TrimSpace(d.Router.Model.ID) == "" &&
-			(item.Path == "router.model" || strings.HasPrefix(item.Path, "models.router.")):
-			continue
 		}
 		skip := false
 		for alias := range emptyAliases {
@@ -302,31 +282,84 @@ func DiagnosticsForDraft(d TeamDraft, catalog []provider.CatalogModel) []Diagnos
 			Severity: "error", Path: "team.id", Message: "is required in lowercase kebab-case",
 		})
 	}
-	if strings.TrimSpace(d.Router.Model.ID) == "" {
+	if strings.TrimSpace(d.Primary.Model.ID) == "" {
 		result = append(result, Diagnostic{
-			Severity: "error", Path: "router.model", Message: "select a catalog model",
+			Severity: "error", Path: "primary.model", Message: "select a catalog model",
 		})
 	}
-	for index, member := range d.Members {
+	if strings.TrimSpace(d.Primary.ID) == "" {
+		result = append(result, Diagnostic{
+			Severity: "error", Path: "primary.id", Message: "is required in lowercase kebab-case",
+		})
+	}
+	for index, member := range d.Peers {
 		if strings.TrimSpace(member.ID) == "" {
 			result = append(result, Diagnostic{
 				Severity: "error",
-				Path:     fmt.Sprintf("members[%d].id", index),
+				Path:     fmt.Sprintf("peers[%d].id", index),
 				Message:  "is required in lowercase kebab-case",
 			})
 		}
 		if strings.TrimSpace(member.Model.ID) == "" {
 			result = append(result, Diagnostic{
 				Severity: "error",
-				Path:     fmt.Sprintf("members[%d].model", index),
+				Path:     fmt.Sprintf("peers[%d].model", index),
 				Message:  "select a catalog model",
 			})
 		}
 	}
-	if len(uniqueStrings(d.RouterEdges)) < 2 {
-		result = append(result, Diagnostic{
-			Severity: "error", Path: "leads", Message: "ALT teams require at least two Leads",
-		})
+	for index, specialist := range d.Specialists {
+		if strings.TrimSpace(specialist.ID) == "" {
+			result = append(result, Diagnostic{Severity: "error", Path: fmt.Sprintf("specialists[%d].id", index), Message: "is required in lowercase kebab-case"})
+		}
+		if strings.TrimSpace(specialist.Model.ID) == "" {
+			result = append(result, Diagnostic{Severity: "error", Path: fmt.Sprintf("specialists[%d].model", index), Message: "select a catalog model"})
+		}
+	}
+	agentIDs := make(map[string]bool, len(d.Peers)+1)
+	if id := strings.TrimSpace(d.Primary.ID); id != "" {
+		agentIDs[id] = true
+	}
+	for _, peer := range d.Peers {
+		if id := strings.TrimSpace(peer.ID); id != "" {
+			agentIDs[id] = true
+		}
+	}
+	specialistIDs := make(map[string]bool, len(d.Specialists))
+	for _, specialist := range d.Specialists {
+		if id := strings.TrimSpace(specialist.ID); id != "" {
+			specialistIDs[id] = true
+		}
+	}
+	peerEdges := make(map[string]bool)
+	for index, edge := range d.PeerEdges {
+		first, second := strings.TrimSpace(edge.FirstAgentID), strings.TrimSpace(edge.SecondAgentID)
+		path := fmt.Sprintf("peer_edges[%d]", index)
+		if !agentIDs[first] || !agentIDs[second] {
+			result = append(result, Diagnostic{Severity: "error", Path: path, Message: "both endpoints must be leadership-capable agents"})
+			continue
+		}
+		if first == second {
+			result = append(result, Diagnostic{Severity: "error", Path: path, Message: "an agent cannot peer with itself"})
+			continue
+		}
+		if second < first {
+			first, second = second, first
+		}
+		key := first + "\x00" + second
+		if peerEdges[key] {
+			result = append(result, Diagnostic{Severity: "error", Path: path, Message: "duplicates another peer edge"})
+		}
+		peerEdges[key] = true
+	}
+	for index, edge := range d.SpecialistEdges {
+		path := fmt.Sprintf("specialist_edges[%d]", index)
+		if !agentIDs[strings.TrimSpace(edge.AgentID)] {
+			result = append(result, Diagnostic{Severity: "error", Path: path, Message: "caller must be a leadership-capable agent"})
+		}
+		if !specialistIDs[strings.TrimSpace(edge.SpecialistID)] {
+			result = append(result, Diagnostic{Severity: "error", Path: path, Message: "callee must be a stateless specialist"})
+		}
 	}
 	available := make(map[string]bool, len(catalog))
 	for _, item := range catalog {
@@ -347,9 +380,12 @@ func DiagnosticsForDraft(d TeamDraft, catalog []provider.CatalogModel) []Diagnos
 			})
 		}
 	}
-	check("router.model", d.Router.Model)
-	for index, member := range d.Members {
-		check(fmt.Sprintf("members[%d].model", index), member.Model)
+	check("primary.model", d.Primary.Model)
+	for index, peer := range d.Peers {
+		check(fmt.Sprintf("peers[%d].model", index), peer.Model)
+	}
+	for index, specialist := range d.Specialists {
+		check(fmt.Sprintf("specialists[%d].model", index), specialist.Model)
 	}
 	sort.SliceStable(result, func(i, j int) bool {
 		if result[i].Severity != result[j].Severity {
@@ -357,18 +393,6 @@ func DiagnosticsForDraft(d TeamDraft, catalog []provider.CatalogModel) []Diagnos
 		}
 		return result[i].Path < result[j].Path
 	})
-	return result
-}
-
-func uniqueStrings(values []string) []string {
-	seen := make(map[string]bool, len(values))
-	result := make([]string, 0, len(values))
-	for _, value := range values {
-		if value != "" && !seen[value] {
-			seen[value] = true
-			result = append(result, value)
-		}
-	}
 	return result
 }
 
@@ -423,4 +447,40 @@ func appendUnique(values []string, value string) []string {
 		}
 	}
 	return append(values, value)
+}
+
+func assignPeer(p *profile.Profile, first, second string) {
+	first, second = strings.TrimSpace(first), strings.TrimSpace(second)
+	if first == "" || second == "" {
+		return
+	}
+	if updateAgent(p, first, func(agent *profile.AgentAssignment) {
+		agent.Peers = appendUnique(agent.Peers, second)
+	}) {
+		return
+	}
+	updateAgent(p, second, func(agent *profile.AgentAssignment) {
+		agent.Peers = appendUnique(agent.Peers, first)
+	})
+}
+
+func assignSpecialist(p *profile.Profile, agentID, specialistID string) {
+	agentID, specialistID = strings.TrimSpace(agentID), strings.TrimSpace(specialistID)
+	updateAgent(p, agentID, func(agent *profile.AgentAssignment) {
+		agent.Specialists = appendUnique(agent.Specialists, specialistID)
+	})
+}
+
+func updateAgent(p *profile.Profile, id string, update func(*profile.AgentAssignment)) bool {
+	if p.Primary.ID == id {
+		update(&p.Primary)
+		return true
+	}
+	for index := range p.Peers {
+		if p.Peers[index].ID == id {
+			update(&p.Peers[index])
+			return true
+		}
+	}
+	return false
 }

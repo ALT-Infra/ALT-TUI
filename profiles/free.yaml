@@ -1,68 +1,58 @@
-schema: 1
+schema: 2
 id: free
-revision: 3
-name: Free
+revision: 4
+name: Free Team
 gateway: opencode
 
 models:
-  router:
+  generalist:
     route: zen
-    name: big-pickle
-  engineering:
+    name: hy3-free
+  investigator:
     route: zen
-    name: deepseek-v4-flash-free
-  research:
-    route: zen
-    name: laguna-s-2.1-free
-  evidence:
+    name: nemotron-3-ultra-free
+  multimodal:
     route: zen
     name: mimo-v2.5-free
-  technical:
-    route: zen
-    name: north-mini-code-free
 
-router:
-  model: router
+primary:
+  id: generalist
+  model: generalist
   definition: |
-    Select the Lead that should remain accountable for the requested result.
-    Engineering owns software, technical systems, code, debugging, architecture,
-    verification, and technical explanation when those are the deliverable.
-    Research owns investigations and comparisons whose main difficulty is
-    establishing current external evidence. Route by the work needed and the
-    requested result, not by the grammatical form of the request.
+    This is the entry point for every user turn. Own requests whose result is
+    implementation, technical work, analysis, writing, or a direct answer. Use
+    the actual workspace and available tools when the request calls for them,
+    keep claims tied to observed evidence, and verify consequential work. Consult
+    the Investigator peer when a bounded part needs deeper research or an
+    independent challenge. Hand leadership to it only when the user's requested
+    final result is principally an evidence-intensive investigation, comparison,
+    source audit, or long-context synthesis.
+  peers: [investigator]
+  specialists: [visual-observer]
 
-leads:
-  - id: engineering
-    model: engineering
+peers:
+  - id: investigator
+    model: investigator
     definition: |
-      Own requests whose result is software, code, debugging, technical analysis,
-      system design, implementation, verification, or a technical explanation.
-      Inspect and change the actual workspace when required, distinguish observed
-      behavior from claims, and verify the result in proportion to risk.
-      Engineering remains accountable for the complete user-facing result.
-    calls: [evidence-specialist]
-    peers: [evidence-specialist]
+      Own evidence-intensive investigations, current comparisons, source audits,
+      difficult long-context synthesis, and independent verification. Prefer
+      primary material, distinguish observation from inference, expose conflicting
+      evidence and uncertainty, and return a conclusion rather than a source dump.
+      Consult the Generalist peer when implementation is a bounded part of the
+      investigation. Hand leadership to it when the user's requested final result
+      becomes working software or another primarily constructive deliverable.
+    specialists: [visual-observer]
 
-  - id: research
-    model: research
+specialists:
+  - id: visual-observer
+    model: multimodal
     definition: |
-      Own requests whose result depends primarily on discovering and assessing
-      current external evidence: investigations, comparisons, source audits, or
-      recommendations. Prefer primary sources, distinguish fact from inference,
-      expose contradictions and uncertainty, and produce a conclusion rather than
-      a source dump. Research remains accountable for the complete user-facing result.
-    calls: [technical-specialist]
-    peers: [technical-specialist]
-
-members:
-  - id: evidence-specialist
-    model: evidence
-    definition: |
-      Investigate a bounded question and return the evidence, contradictions, and uncertainty the responsible Lead needs. Do not take ownership of the whole request.
-  - id: technical-specialist
-    model: technical
-    definition: |
-      Examine a bounded technical question and return concrete implementation or system findings to the responsible Lead. Do not take ownership of the whole request.
+      This is a thoroughly stateless multimodal observation specialist. Answer
+      only the caller's self-contained question about the images, video, audio,
+      diagrams, or screenshots explicitly attached to this invocation. Report
+      observable content, transcription, spatial relationships, and uncertainty;
+      do not assume conversation history, decide the user's broader task, or take
+      ownership of implementation. Every invocation begins from a clean slate.
 
 disclosure:
   persist_provider_reasoning: true

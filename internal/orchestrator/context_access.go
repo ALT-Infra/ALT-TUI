@@ -120,14 +120,11 @@ func boundedContextOpen(
 	if offset < 0 || offset > len(content) {
 		return tooling.ContextOpenResult{}, fmt.Errorf("context byte_offset must be within [0,%d]", len(content))
 	}
-	if limit <= 0 {
-		limit = 16_000
-	}
 	if utf8.Valid(content) && offset < len(content) && !utf8.RuneStart(content[offset]) {
 		return tooling.ContextOpenResult{}, fmt.Errorf("context byte_offset %d splits a UTF-8 code point", offset)
 	}
 	end := len(content)
-	if limit < len(content)-offset {
+	if limit > 0 && limit < len(content)-offset {
 		end = offset + limit
 	}
 	if utf8.Valid(content) {
@@ -165,11 +162,11 @@ func (r *sessionRuntime) contextScope(ctx context.Context, owner string) (store.
 		return store.ContextScope{}, fmt.Errorf("invalid context owner %q", owner)
 	}
 
-	// The accountable coordination scopes can inspect the exact conversation
-	// ledger. This includes all prior requests in the same conversation, while
-	// still excluding every other conversation in the database.
+	// Leadership-capable agents and peers are context-bearing. They can inspect the
+	// exact ledger for this conversation, while every other conversation remains
+	// outside the authority boundary.
 	switch parts[0] {
-	case "lead", "final", "router":
+	case "agent":
 		turns, err := r.store.ConversationSessions(ctx, r.session.ID)
 		if err != nil {
 			return store.ContextScope{}, err
@@ -197,16 +194,20 @@ func (r *sessionRuntime) contextScope(ctx context.Context, owner string) (store.
 	}
 	scope := store.ContextScope{SessionIDs: sessionIDs}
 	switch parts[0] {
-	case "member":
+	case "specialist":
 		if len(parts) < 3 {
-			return store.ContextScope{}, fmt.Errorf("invalid member context owner %q", owner)
+			return store.ContextScope{}, fmt.Errorf("invalid specialist context owner %q", owner)
 		}
 		delegation := state.Delegations[parts[2]]
-		if delegation == nil || delegation.Spec.MemberID != parts[1] {
-			return store.ContextScope{}, fmt.Errorf("member context owner is not assigned to %s", parts[2])
+		if delegation == nil || delegation.Spec.SpecialistID != parts[1] {
+			return store.ContextScope{}, fmt.Errorf("specialist context owner is not assigned to %s", parts[2])
 		}
-		scope.CorrelationIDs = []string{delegation.Spec.ID}
-		scope.Owners = []string{owner, strings.Join(parts[:3], ":")}
+		// Do not grant the delegation correlation: it also contains records from
+		// earlier attempts of this delegation. Every retry is a new clean-slate
+		// specialist invocation. The exact attempt owner permits only archives
+		// created inside this invocation; all other records must be cited
+		// explicitly by the caller in the standalone prompt.
+		scope.Owners = []string{owner}
 		scope.RecordIDs = explicitContextRecordIDs(delegation.Spec.Objective, delegation.Spec.Context)
 		scope.ArtifactReferences = explicitContextArtifactReferences(delegation.Spec.Objective, delegation.Spec.Context)
 	case "peer":
@@ -232,7 +233,10 @@ func (r *sessionRuntime) contextScope(ctx context.Context, owner string) (store.
 		if len(scope.CorrelationIDs) == 0 {
 			return store.ContextScope{}, fmt.Errorf("peer collaboration %s is unavailable to %s", collaborationID, parts[1])
 		}
-		scope.Owners = append(scope.Owners, owner, strings.Join(parts[:3], ":"))
+		// The validation above prevents a fabricated peer owner from opening the
+		// ledger. A real peer has the same conversation-bearing context authority
+		// as a leadership-capable agent, including work from earlier consultations.
+		scope.IncludeAllSessionRecords = true
 	default:
 		return store.ContextScope{}, fmt.Errorf("unknown context owner %q", owner)
 	}

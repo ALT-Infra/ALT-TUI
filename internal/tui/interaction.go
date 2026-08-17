@@ -57,7 +57,7 @@ func (m Model) submit(queue bool) (tea.Model, tea.Cmd) {
 			m.touchTranscript(true)
 			return m, nil
 		}
-		m.status = "steering the active Lead"
+		m.status = "steering the active leader"
 		if current := m.current(); current != nil {
 			current.prompts = append(current.prompts, display)
 			m.optimisticSteers = append(m.optimisticSteers, display)
@@ -289,7 +289,7 @@ func (m Model) shortcutOverlay() string {
 	lines := []string{
 		sectionStyle(m.darkBackground).Render("ALT shortcuts"),
 		"",
-		"Enter        submit / steer active Lead",
+		"Enter        submit / steer active leader",
 		"Tab          queue while work is running",
 		"Alt+Up       edit the most recent queued prompt",
 		"Ctrl+J       insert newline",
@@ -427,7 +427,7 @@ func steerSessionCmd(
 		if err := app.Engine.SteerInput(ctx, sessionID, payload); err != nil {
 			return steerRejectedMsg{prompt: payloadDisplay(payload), payload: payload, err: err}
 		}
-		return infoMsg("instruction delivered to the active Lead")
+		return infoMsg("instruction delivered to the active leader")
 	}
 }
 

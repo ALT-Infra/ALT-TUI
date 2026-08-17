@@ -38,8 +38,8 @@ func (*Factory) Descriptor() provider.GatewayDescriptor {
 		CredentialEnvironment: "ALT_OPENCODE_API_KEY",
 		MultiModelCatalog:     true,
 		Routes: []provider.GatewayRoute{
-			{ID: GoRoute, Label: "Go"},
-			{ID: ZenRoute, Label: "Zen"},
+			{ID: GoRoute, Label: "Go", MetadataCatalog: "opencode-go"},
+			{ID: ZenRoute, Label: "Zen", MetadataCatalog: "opencode"},
 		},
 	}
 }
@@ -75,7 +75,7 @@ func (f *Factory) NewChatModel(ctx context.Context, spec profile.Model, mode pro
 		APIKey:     key,
 		BaseURL:    endpoint,
 		Model:      spec.Name,
-		HTTPClient: f.HTTPClient,
+		HTTPClient: provider.CacheAwareHTTPClient(f.HTTPClient),
 	}
 	// OpenCode's authenticated catalog does not currently attest native
 	// structured-output support. Unknown is not promoted to Supported: ALT
@@ -84,7 +84,11 @@ func (f *Factory) NewChatModel(ctx context.Context, spec profile.Model, mode pro
 	if spec.ReasoningEffort != "" {
 		config.ExtraFields = map[string]any{"reasoning_effort": spec.ReasoningEffort}
 	}
-	return einoopenai.NewChatModel(ctx, config)
+	chat, err := einoopenai.NewChatModel(ctx, config)
+	if err != nil {
+		return nil, err
+	}
+	return provider.ObserveCacheUsage(chat), nil
 }
 
 type modelsResponse struct {

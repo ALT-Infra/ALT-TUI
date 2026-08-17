@@ -17,140 +17,144 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-func TestRichImageTraversesAuthorizedStatelessAndStatefulEdges(t *testing.T) {
-	for _, peer := range []bool{false, true} {
-		name := "stateless specialist"
-		if peer {
-			name = "stateful peer"
+func TestBlindCodingPrimaryUsesExplicitlySelectedVisionSpecialist(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	ledger, err := store.OpenMemory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	artifact := runtimeImage(t)
+	factory := &blindCoderVisionFactory{reference: artifact.Reference}
+	registry := provider.NewRegistry()
+	if err := registry.Register(factory); err != nil {
+		t.Fatal(err)
+	}
+	document, err := profile.FromValue(visionCodingProfile(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := "Fix the code using the exact compiler diagnostic in this screenshot: "
+	payload := content.Payload{Input: content.Input{Parts: []content.Part{
+		{Type: content.PartText, Text: request},
+		{Type: content.PartAttachment, Attachment: &artifact.ArtifactRef},
+	}}, Artifacts: []content.Artifact{artifact}}
+	run, err := NewEngine(ledger, registry).StartInputAt(ctx, document, payload, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run.Wait(ctx); err != nil {
+		logEvents(t, ledger, run.SessionID)
+		t.Fatal(err)
+	}
+	factory.mu.Lock()
+	primarySawImage := factory.primarySawImage
+	primarySawExactText := factory.primarySawExactText
+	specialistSawImage := factory.specialistSawImage
+	factory.mu.Unlock()
+	if primarySawImage {
+		t.Fatal("catalog-declared blind coding primary received image bytes")
+	}
+	if !primarySawExactText {
+		t.Fatal("blind coding primary did not receive the user's exact text")
+	}
+	if !specialistSawImage {
+		t.Fatal("explicitly selected vision specialist did not receive image bytes")
+	}
+	events, err := ledger.Events(ctx, run.SessionID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var spec event.DelegationSpec
+	for _, item := range events {
+		if item.Kind == event.DelegationCreated {
+			spec, err = event.Decode[event.DelegationSpec](item)
+			if err != nil {
+				t.Fatal(err)
+			}
 		}
-		t.Run(name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			ledger, err := store.OpenMemory(ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer ledger.Close()
-			artifact := runtimeImage(t)
-			factory := &richImageScenarioFactory{reference: artifact.Reference, peer: peer}
-			registry := provider.NewRegistry()
-			if err := registry.Register(factory); err != nil {
-				t.Fatal(err)
-			}
-			document, err := profile.Parse([]byte(testProfile))
-			if err != nil {
-				t.Fatal(err)
-			}
-			payload := content.Payload{Input: content.Input{Parts: []content.Part{
-				{Type: content.PartText, Text: "Describe this architecture: "},
-				{Type: content.PartAttachment, Attachment: &artifact.ArtifactRef},
-			}}, Artifacts: []content.Artifact{artifact}}
-			run, err := NewEngine(ledger, registry).StartInput(ctx, document, payload)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := run.Wait(ctx); err != nil {
-				logEvents(t, ledger, run.SessionID)
-				t.Fatal(err)
-			}
-			factory.mu.Lock()
-			routerSawImage, collaboratorSawImage := factory.routerSawImage, factory.collaboratorSawImage
-			factory.mu.Unlock()
-			if !routerSawImage || !collaboratorSawImage {
-				t.Fatalf("multimodal delivery = router %v collaborator %v", routerSawImage, collaboratorSawImage)
-			}
-			items, err := ledger.Events(ctx, run.SessionID, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
-			transferred := false
-			for _, item := range items {
-				if !peer && item.Kind == event.DelegationCreated {
-					spec, decodeErr := event.Decode[event.DelegationSpec](item)
-					transferred = decodeErr == nil && len(spec.Attachments) == 1 && spec.Attachments[0] == artifact.Reference
-				}
-				if peer && item.Kind == event.PeerTurnCreated {
-					spec, decodeErr := event.Decode[event.PeerTurnSpec](item)
-					transferred = decodeErr == nil && len(spec.Attachments) == 1 && spec.Attachments[0] == artifact.Reference
-				}
-			}
-			if !transferred {
-				t.Fatal("durable authorized edge omitted the selected attachment reference")
-			}
-			session, err := ledger.Session(ctx, run.SessionID)
-			if err != nil || session.FinalAnswer != "The diagram visibly labels the router." {
-				t.Fatalf("accountable final = %q, %v", session.FinalAnswer, err)
-			}
-		})
+	}
+	if spec.CallerID != "deepseek-coder" || spec.SpecialistID != "vision-specialist" || len(spec.Attachments) != 1 || spec.Attachments[0] != artifact.Reference {
+		t.Fatalf("durable specialist call did not preserve explicit authority: %#v", spec)
+	}
+	session, err := ledger.Session(ctx, run.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.FinalAnswer != "I fixed the undefined symbol reported at parser.go:42." {
+		t.Fatalf("final answer = %q", session.FinalAnswer)
+	}
+	if _, exists, err := ledger.Get(ctx, modelSurfaceKey(session.ConversationID, "vision-specialist")); err != nil {
+		t.Fatal(err)
+	} else if exists {
+		t.Fatal("stateless specialist acquired a durable model surface")
 	}
 }
 
-type richImageScenarioFactory struct {
-	mu                   sync.Mutex
-	reference            string
-	peer                 bool
-	leadCalls            int
-	routerSawImage       bool
-	collaboratorSawImage bool
+type blindCoderVisionFactory struct {
+	mu                  sync.Mutex
+	reference           string
+	primaryCalls        int
+	primarySawImage     bool
+	primarySawExactText bool
+	specialistSawImage  bool
 }
 
-func (*richImageScenarioFactory) Descriptor() provider.GatewayDescriptor {
+func (*blindCoderVisionFactory) Descriptor() provider.GatewayDescriptor {
 	return testGatewayDescriptor()
 }
 
-func (*richImageScenarioFactory) ListModels(context.Context) ([]provider.CatalogModel, error) {
-	return testCatalog(), nil
+func (*blindCoderVisionFactory) ListModels(context.Context) ([]provider.CatalogModel, error) {
+	return []provider.CatalogModel{
+		{Gateway: "opencode", Route: "test", ID: "deepseek-code", Capabilities: provider.Capabilities{ToolCalling: provider.CapabilitySupported, ImageInput: provider.CapabilityUnsupported}},
+		{Gateway: "opencode", Route: "test", ID: "research", Capabilities: provider.Capabilities{ToolCalling: provider.CapabilitySupported}},
+		{Gateway: "opencode", Route: "test", ID: "vision", Capabilities: provider.Capabilities{ToolCalling: provider.CapabilityUnsupported, ImageInput: provider.CapabilitySupported}},
+	}, nil
 }
 
-func (f *richImageScenarioFactory) NewChatModel(_ context.Context, spec profile.Model, _ provider.Mode) (model.BaseChatModel, error) {
-	return &richImageScenarioModel{factory: f, name: spec.Name}, nil
+func (f *blindCoderVisionFactory) NewChatModel(_ context.Context, spec profile.Model, _ provider.Mode) (model.BaseChatModel, error) {
+	return &blindCoderVisionModel{factory: f, name: spec.Name}, nil
 }
 
-type richImageScenarioModel struct {
-	factory *richImageScenarioFactory
+type blindCoderVisionModel struct {
+	factory *blindCoderVisionFactory
 	name    string
 }
 
-func (m *richImageScenarioModel) WithTools(_ []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+func (m *blindCoderVisionModel) WithTools(_ []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
 	return m, nil
 }
 
-func (m *richImageScenarioModel) Generate(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-	if m.name != "router" {
-		return nil, fmt.Errorf("unexpected Generate call for %s", m.name)
-	}
-	m.factory.mu.Lock()
-	m.factory.routerSawImage = messagesContainImage(input)
-	m.factory.mu.Unlock()
-	return response(`{"lead_id":"architecture-lead","confidence":1,"basis":"The accountable architecture Lead owns the supplied visual evidence."}`), nil
+func (m *blindCoderVisionModel) Generate(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	return response(m.reply(input)), nil
 }
 
-func (m *richImageScenarioModel) Stream(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+func (m *blindCoderVisionModel) Stream(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	return schema.StreamReaderFromArray([]*schema.Message{response(m.reply(input))}), nil
+}
+
+func (m *blindCoderVisionModel) reply(input []*schema.Message) string {
 	switch m.name {
-	case "research":
+	case "deepseek-code":
 		m.factory.mu.Lock()
-		m.factory.collaboratorSawImage = messagesContainImage(input)
-		m.factory.mu.Unlock()
-		return schema.StreamReaderFromArray([]*schema.Message{response(`{"result":"The image visibly labels the router.","findings":["router label"],"risks":[],"confidence":1}`)}), nil
-	case "lead":
-		m.factory.mu.Lock()
-		m.factory.leadCalls++
-		call := m.factory.leadCalls
-		reference, peer := m.factory.reference, m.factory.peer
+		m.factory.primaryCalls++
+		call := m.factory.primaryCalls
+		m.factory.primarySawImage = m.factory.primarySawImage || messagesContainImage(input)
+		m.factory.primarySawExactText = m.factory.primarySawExactText || exactUserText(input) == "Fix the code using the exact compiler diagnostic in this screenshot: "
+		reference := m.factory.reference
 		m.factory.mu.Unlock()
 		if call == 1 {
-			decision := fmt.Sprintf(`{"assessment":"Independent visual evidence is needed.","delegations":[{"key":"visual","member_id":"research","objective":"Inspect the supplied image and report visible labels.","context":"","attachments":[%q],"depends_on":[]}],"peer_turns":[],"cancel":[],"finalize":false,"final_brief":""}`, reference)
-			if peer {
-				decision = fmt.Sprintf(`{"assessment":"A stateful visual collaboration is useful.","delegations":[],"peer_turns":[{"key":"visual","peer_id":"research","collaboration_id":"","objective":"Inspect the supplied image and report visible labels.","context":"","attachments":[%q]}],"cancel":[],"finalize":false,"final_brief":""}`, reference)
-			}
-			return schema.StreamReaderFromArray([]*schema.Message{response(decision)}), nil
+			return fmt.Sprintf(`{"kind":"coordinate","assessment":"The coding primary needs the pixels transcribed.","delegations":[{"key":"read-diagnostic","specialist_id":"vision-specialist","objective":"Transcribe the compiler diagnostic, filename, and line number visible in the attached screenshot.","context":"Return observable text only.","attachments":[%q],"depends_on":[]}],"peer_turns":[],"cancel":[],"handoff":null}`, reference)
 		}
-		if call == 2 {
-			return schema.StreamReaderFromArray([]*schema.Message{response(`{"assessment":"The visual report is sufficient.","delegations":[],"peer_turns":[],"cancel":[],"finalize":true,"final_brief":"Report the visible router label."}`)}), nil
-		}
-		return schema.StreamReaderFromArray([]*schema.Message{response("The diagram visibly labels the router.")}), nil
+		return "I fixed the undefined symbol reported at parser.go:42."
+	case "vision":
+		m.factory.mu.Lock()
+		m.factory.specialistSawImage = m.factory.specialistSawImage || messagesContainImage(input)
+		m.factory.mu.Unlock()
+		return `{"result":"parser.go:42: undefined: tokenKind","findings":["compiler diagnostic transcribed"],"risks":[],"confidence":1}`
 	default:
-		return nil, fmt.Errorf("unexpected Stream call for %s", m.name)
+		return "unexpected model"
 	}
 }
 

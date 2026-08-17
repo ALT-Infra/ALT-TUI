@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand/v2"
 	"os"
 	"os/exec"
 	"strings"
@@ -16,28 +15,23 @@ import (
 	"github.com/creack/pty"
 )
 
-const (
-	defaultProcessYield = 10 * time.Second
-	minProcessSessionID = 1_000
-	maxProcessSessionID = 100_000
-)
-
 type ExecCommandInput struct {
 	Command     string `json:"cmd" jsonschema:"description=Shell command to execute in the session workspace."`
-	YieldTimeMS int    `json:"yield_time_ms,omitempty" jsonschema:"description=How long to wait for completion or new output before yielding. Zero uses 10000 milliseconds."`
+	YieldTimeMS int    `json:"yield_time_ms,omitempty" jsonschema:"description=Optional maximum wait for completion or new output. Zero waits for the next natural process event; use a positive value when a quiet long-running command must yield control."`
 	TTY         bool   `json:"tty,omitempty" jsonschema:"description=Allocate a pseudo-terminal for interactive or terminal-sensitive programs."`
 }
 
 type WriteStdinInput struct {
 	SessionID   int    `json:"session_id" jsonschema:"description=Identifier of the running exec_command session."`
 	Chars       string `json:"chars,omitempty" jsonschema:"description=Exact characters to write. Leave empty to poll for output."`
-	YieldTimeMS int    `json:"yield_time_ms,omitempty" jsonschema:"description=How long to wait for completion or new output before yielding. Zero uses 10000 milliseconds."`
+	YieldTimeMS int    `json:"yield_time_ms,omitempty" jsonschema:"description=Optional maximum wait for completion or new output. Zero waits for the next natural process event; use a positive value when polling a quiet long-running process."`
 }
 
 type ProcessResult struct {
 	SessionID int    `json:"session_id,omitempty"`
 	Output    string `json:"output,omitempty"`
 	Running   bool   `json:"running"`
+	HasMore   bool   `json:"has_more,omitempty"`
 	ExitCode  *int   `json:"exit_code,omitempty"`
 }
 
@@ -46,6 +40,7 @@ type processManager struct {
 	mu       sync.Mutex
 	sessions map[int]*processSession
 	reserved map[int]struct{}
+	nextID   int
 	closed   bool
 }
 
@@ -264,8 +259,15 @@ func (m *processManager) collect(
 		case <-ctx.Done():
 			return ProcessResult{}, ctx.Err()
 		}
+	} else if yield < 0 {
+		select {
+		case <-session.done:
+		case <-session.outputNotify:
+		case <-ctx.Done():
+			return ProcessResult{}, ctx.Err()
+		}
 	}
-	output, err := session.readNew()
+	output, hasMore, err := session.readNew(m.runtime.modelVisibleProcessBytes(owner))
 	if err != nil {
 		return ProcessResult{}, err
 	}
@@ -275,20 +277,27 @@ func (m *processManager) collect(
 		exitCode := session.exitCode
 		waitErr := session.waitErr
 		session.stateMu.Unlock()
+		if waitErr != nil && exitCode == nil {
+			return ProcessResult{}, waitErr
+		}
+		if hasMore {
+			return ProcessResult{
+				SessionID: session.id, Output: output, Running: false,
+				HasMore: true, ExitCode: exitCode,
+			}, nil
+		}
 		m.mu.Lock()
 		delete(m.sessions, session.id)
 		delete(m.reserved, session.id)
 		m.mu.Unlock()
 		session.cleanup()
-		if waitErr != nil && exitCode == nil {
-			return ProcessResult{}, waitErr
-		}
 		return ProcessResult{Output: output, ExitCode: exitCode}, nil
 	default:
 		return ProcessResult{
 			SessionID: session.id,
 			Output:    output,
 			Running:   true,
+			HasMore:   hasMore,
 		}, nil
 	}
 }
@@ -333,23 +342,28 @@ func (s *processSession) wait() {
 	close(s.done)
 }
 
-func (s *processSession) readNew() (string, error) {
+func (s *processSession) readNew(limit int) (string, bool, error) {
 	s.readMu.Lock()
 	defer s.readMu.Unlock()
 	info, err := s.output.Stat()
 	if err != nil {
-		return "", fmt.Errorf("inspect process transcript: %w", err)
+		return "", false, fmt.Errorf("inspect process transcript: %w", err)
 	}
 	if info.Size() <= s.offset {
-		return "", nil
+		return "", false, nil
 	}
-	content := make([]byte, info.Size()-s.offset)
+	available := info.Size() - s.offset
+	readSize := available
+	if limit > 0 && readSize > int64(limit) {
+		readSize = int64(limit)
+	}
+	content := make([]byte, readSize)
 	count, err := s.output.ReadAt(content, s.offset)
 	if err != nil && !errors.Is(err, io.EOF) {
-		return "", fmt.Errorf("read process transcript: %w", err)
+		return "", false, fmt.Errorf("read process transcript: %w", err)
 	}
 	s.offset += int64(count)
-	return string(content[:count]), nil
+	return string(content[:count]), s.offset < info.Size(), nil
 }
 
 func (s *processSession) terminate() {
@@ -365,22 +379,21 @@ func (s *processSession) cleanup() {
 	_ = os.Remove(s.output.Name())
 }
 
-// reserveSessionID follows Codex's model-facing process-handle contract: IDs
-// are short JSON numbers in [1000, 100000), reserved before process startup,
-// and collision-checked for the complete lifetime of the process. The random
-// number is a usability handle, not an authority boundary; owner checks remain
-// mandatory on every operation.
+// reserveSessionID issues the next small positive handle in this private
+// runtime. Authority comes from the owner check, so randomness and a copied
+// numeric range add no safety; sequential allocation also cannot collide.
 func (m *processManager) reserveSessionID() (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
 		return 0, fmt.Errorf("tool runtime is closed")
 	}
-	if len(m.reserved) >= maxProcessSessionID-minProcessSessionID {
-		return 0, fmt.Errorf("no process session IDs are available")
-	}
 	for {
-		candidate := minProcessSessionID + rand.IntN(maxProcessSessionID-minProcessSessionID)
+		if m.nextID == int(^uint(0)>>1) {
+			m.nextID = 0
+		}
+		m.nextID++
+		candidate := m.nextID
 		if _, exists := m.reserved[candidate]; exists {
 			continue
 		}
@@ -424,7 +437,9 @@ func processYield(milliseconds int) (time.Duration, error) {
 		return 0, fmt.Errorf("yield_time-ms cannot be negative")
 	}
 	if milliseconds == 0 {
-		return defaultProcessYield, nil
+		// Negative is an internal sentinel for event-driven waiting. Zero is
+		// retained for the explicit non-blocking collection used after done.
+		return -1, nil
 	}
 	return time.Duration(milliseconds) * time.Millisecond, nil
 }

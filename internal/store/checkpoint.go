@@ -36,18 +36,28 @@ func (s *Store) Set(ctx context.Context, key string, value []byte) error {
 		return fmt.Errorf("begin checkpoint: %w", err)
 	}
 	defer tx.Rollback()
-	var version int
-	if err := tx.QueryRowContext(ctx, `
-		SELECT COALESCE(MAX(version), 0) + 1
-		FROM checkpoint_versions WHERE key = ?`, key).Scan(&version); err != nil {
-		return fmt.Errorf("allocate checkpoint version: %w", err)
-	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	digest := sha256.Sum256(value)
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO checkpoint_versions(key, version, value, digest, created_at)
-		VALUES (?, ?, ?, ?, ?)`, key, version, value, hex.EncodeToString(digest[:]), now); err != nil {
-		return fmt.Errorf("archive checkpoint: %w", err)
+	digestText := hex.EncodeToString(digest[:])
+	var latestDigest string
+	err = tx.QueryRowContext(ctx, `
+		SELECT digest FROM checkpoint_versions
+		WHERE key = ? ORDER BY version DESC LIMIT 1`, key).Scan(&latestDigest)
+	if err != nil && !isNotFound(err) {
+		return fmt.Errorf("inspect latest checkpoint version: %w", err)
+	}
+	if latestDigest != digestText {
+		var version int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COALESCE(MAX(version), 0) + 1
+			FROM checkpoint_versions WHERE key = ?`, key).Scan(&version); err != nil {
+			return fmt.Errorf("allocate checkpoint version: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO checkpoint_versions(key, version, value, digest, created_at)
+			VALUES (?, ?, ?, ?, ?)`, key, version, value, digestText, now); err != nil {
+			return fmt.Errorf("archive checkpoint: %w", err)
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO checkpoints(key, value, updated_at)
@@ -72,9 +82,10 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
-// CheckpointVersions returns the exact append-only history behind Eino's
-// mutable checkpoint pointer. Deleting a live checkpoint never deletes these
-// versions; they are provenance and recovery evidence, not active state.
+// CheckpointVersions returns the exact append-only history of distinct states
+// behind Eino's mutable checkpoint pointer. Rewriting identical bytes does not
+// create provenance, while deleting a live checkpoint never deletes a changed
+// state; the versions are recovery evidence, not active state.
 func (s *Store) CheckpointVersions(ctx context.Context, key string) ([]CheckpointVersion, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT key, version, value, digest, created_at

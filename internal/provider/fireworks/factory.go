@@ -33,12 +33,13 @@ func NewFactory(credentials credential.Store) *Factory {
 				CredentialEnvironment: "ALT_FIREWORKS_API_KEY",
 				MultiModelCatalog:     true,
 				Routes: []provider.GatewayRoute{
-					{ID: Route, Label: "Serverless"},
+					{ID: Route, Label: "Serverless", MetadataCatalog: "fireworks-ai"},
 				},
 			},
-			Route:    Route,
-			BaseURL:  InferenceEndpoint,
-			Hostname: "api.fireworks.ai",
+			Route:               Route,
+			BaseURL:             InferenceEndpoint,
+			Hostname:            "api.fireworks.ai",
+			PromptCacheAffinity: true,
 		},
 	)}
 }

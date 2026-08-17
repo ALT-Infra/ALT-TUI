@@ -99,9 +99,9 @@ func TestOpeningExistingDatabaseBackfillsLosslessArchives(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := ledger.Append(ctx, session.ID, event.Draft{
-		Kind: event.LeadTurnStarted, Actor: "engineering",
+		Kind: event.AgentTurnStarted, Actor: "engineering",
 		CorrelationID: "lead-turn", CausationID: "previous-event",
-		Data: event.LeadTurnData{Turn: 1},
+		Data: event.AgentTurnData{AgentID: "engineering", Turn: 1},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestRepeatedContextEpochsNeverReplaceCanonicalEvidence(t *testing.T) {
 	for epoch := 1; epoch <= 128; epoch++ {
 		view := json.RawMessage(fmt.Sprintf(`{"epoch":%d,"pinned":"repeat compaction without erosion"}`, epoch))
 		committed, err := ledger.CommitContextEpoch(ctx, store.ContextEpoch{
-			SessionID: session.ID, ScopeKind: "lead", ScopeID: "lead-1",
+			SessionID: session.ID, ScopeKind: "agent", ScopeID: "lead-1",
 			SourceThroughSequence: last, View: view, EstimatedTokens: 12,
 		})
 		if err != nil {
@@ -219,7 +219,7 @@ func TestRepeatedContextEpochsNeverReplaceCanonicalEvidence(t *testing.T) {
 			t.Fatalf("allocated epoch %d, want %d", committed.Epoch, epoch)
 		}
 	}
-	latest, found, err := ledger.LatestContextEpoch(ctx, session.ID, "lead", "lead-1")
+	latest, found, err := ledger.LatestContextEpoch(ctx, session.ID, "agent", "lead-1")
 	if err != nil || !found || latest.Epoch != 128 {
 		t.Fatalf("latest repeated epoch = (%#v, %v, %v)", latest, found, err)
 	}

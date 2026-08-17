@@ -26,12 +26,12 @@ func (r *sessionRuntime) executePeerTurn(parent context.Context, turnID string, 
 	if turn == nil || turn.Status == DelegationCompleted || turn.Status == DelegationCancelled {
 		return
 	}
-	lead, ok := r.profile.Lead(state.LeadID)
+	caller, ok := r.profile.Agent(turn.Spec.CallerID)
 	if !ok {
-		r.stopWithError(fmt.Errorf("selected Lead %s is absent", state.LeadID))
+		r.stopWithError(fmt.Errorf("peer caller %s is absent", turn.Spec.CallerID))
 		return
 	}
-	peer, ok := r.profile.PeerMemberFor(lead, turn.Spec.PeerID)
+	peer, ok := r.profile.PeerAgentFor(caller, turn.Spec.PeerID)
 	if !ok {
 		r.stopWithError(fmt.Errorf("peer %s is not permitted", turn.Spec.PeerID))
 		return
@@ -56,14 +56,14 @@ func (r *sessionRuntime) executePeerTurn(parent context.Context, turnID string, 
 		return
 	}
 
-	raw, runErr := r.runPeerMember(ctx, peer, turn, state.CollaborationTurns(turn.Spec.CollaborationID), state.LastSequence, attempt)
+	raw, runErr := r.runPeerConsultation(ctx, peer, turn, state.CollaborationTurns(turn.Spec.CollaborationID), state, state.LastSequence, attempt)
 	if runErr != nil {
 		r.handlePeerTurnFailure(parent, turnID, peer.ID, attempt, runErr)
 		return
 	}
-	result, parseErr := decodeJSONObject[MemberResult](raw)
+	result, parseErr := decodeJSONObject[SpecialistResult](raw)
 	if parseErr != nil {
-		result = MemberResult{Result: strings.TrimSpace(raw)}
+		result = SpecialistResult{Result: strings.TrimSpace(raw)}
 	}
 	if strings.TrimSpace(result.Result) == "" {
 		r.handlePeerTurnFailure(parent, turnID, peer.ID, attempt, fmt.Errorf("peer returned an empty result"))
@@ -83,50 +83,99 @@ func (r *sessionRuntime) executePeerTurn(parent context.Context, turnID string, 
 	r.pushSignal(Signal{Kind: string(event.PeerTurnCompleted), EventID: completed.ID, DelegationID: turnID})
 }
 
-func (r *sessionRuntime) runPeerMember(
+func (r *sessionRuntime) runPeerConsultation(
 	ctx context.Context,
-	peer profile.MemberAssignment,
+	peer profile.AgentAssignment,
 	turn *PeerTurn,
 	history []*PeerTurn,
+	state *Projection,
 	sourceThrough int64,
 	attempt int,
 ) (string, error) {
+	unlockSurface := r.lockModelSurface(peer.ID)
+	defer unlockSurface()
 	capabilities := r.providers.Capabilities(r.profile.Gateway, r.profile.Models[peer.Model])
-	if capabilities.ToolCalling == provider.CapabilityUnsupported {
-		return "", fmt.Errorf("authenticated gateway catalog marks peer %s model %s as tool-call unsupported; ALT assignments require dynamic runtime tools", peer.ID, r.profile.Models[peer.Model].Name)
+	surface, err := loadModelSurface(ctx, r.store, r.session.ConversationID, peer.ID)
+	if err != nil {
+		return "", err
 	}
-	chat, modelSpec, err := r.providers.Model(ctx, r.profile, peer.Model, provider.Text)
+	system, user := peerMessages(
+		r.profile, peer, turn, history, state, surface.LastSessionID != r.session.ID,
+	)
+	if capabilities.ToolCalling == provider.CapabilityUnsupported {
+		system += "\nThe authenticated catalog marks this model as tool-call unsupported. Use supplied state and Team collaboration honestly."
+	}
+	modelContext := provider.WithCacheScope(ctx, r.session.ConversationID+":agent:"+peer.ID)
+	chat, modelSpec, err := r.providers.Model(modelContext, r.profile, peer.Model, provider.Text)
 	if err != nil {
 		return "", err
 	}
 	chat = r.observeModel(peer.Model, "peer:"+peer.ID, turn.Spec.ID)(chat)
 	toolOwner := fmt.Sprintf("peer:%s:%s:%d:%d", peer.ID, turn.Spec.CollaborationID, turn.Spec.Round, attempt)
-	handlers, err := r.tools.HandlersWithCompaction(ctx, toolOwner, chat)
-	if err != nil {
-		return "", err
+	var handlers []adk.ChatModelAgentMiddleware
+	if capabilities.ToolCalling != provider.CapabilityUnsupported {
+		runtimeHandlers, err := r.tools.HandlersWithCompaction(
+			modelContext, toolOwner, chat,
+			r.providers.Limits(r.profile.Gateway, modelSpec),
+		)
+		if err != nil {
+			return "", err
+		}
+		handlers = tooling.AgentHandlers(runtimeHandlers...)
+	} else {
+		handlers, err = r.tools.CompactionHandlers(
+			modelContext, toolOwner, chat,
+			r.providers.Limits(r.profile.Gateway, modelSpec),
+		)
+		if err != nil {
+			return "", err
+		}
 	}
-	system, user := peerMessages(r.profile, peer, turn, history)
-	attachmentReferences := append([]string(nil), turn.Spec.Attachments...)
+	// A peer is context-bearing. It receives every attachment available to the
+	// current turn, while an explicitly requested list remains useful durable
+	// provenance for why the consultation was created.
+	attachmentReferences := projectionAttachmentReferences(state)
+	attachmentReferences = append(attachmentReferences, turn.Spec.Attachments...)
 	for _, earlier := range history {
 		attachmentReferences = append(attachmentReferences, earlier.Spec.Attachments...)
 	}
-	userMessage, err := r.richUserMessage(ctx, peer.Model, user, uniqueStrings(attachmentReferences))
+	snapshot := user + fmt.Sprintf("\n\nretry_attempt: %d", attempt)
+	snapshotDigest := digestText(snapshot)
+	userMessage, err := r.richUserMessage(
+		ctx, peer.Model, runtimeSnapshotText(snapshotDigest, snapshot),
+		uniqueStrings(attachmentReferences),
+	)
+	if err != nil {
+		return "", err
+	}
+	exactUserMessage, err := r.richExactInputMessage(ctx, peer.Model, state.TaskInput)
+	if err != nil {
+		return "", err
+	}
+	messages, snapshotDigest, err := prepareModelSurfaceMessagesWithSnapshot(
+		surface, system, r.session.ID, exactUserMessage, userMessage, snapshotDigest,
+	)
 	if err != nil {
 		return "", err
 	}
 	if _, err := r.commitWorkingView(ctx, "peer", turn.Spec.CollaborationID, sourceThrough, user); err != nil {
 		return "", err
 	}
-	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
-		Name: "peer-" + peer.ID, Description: r.profile.MemberDefinition(peer),
-		Instruction: system, Model: chat, Handlers: tooling.AgentHandlers(handlers...),
+	handlers = append(handlers, newModelSurfaceHandler(
+		r.store, r.session.ID,
+		r.profile.Gateway+":"+peer.Model+":"+modelSpec.Name,
+		surface, snapshotDigest,
+	))
+	agent, err := adk.NewChatModelAgent(modelContext, &adk.ChatModelAgentConfig{
+		Name: "peer-" + peer.ID, Description: r.profile.AgentDefinition(peer),
+		Instruction: system, Model: chat, Handlers: handlers,
 		MaxIterations: unboundedAgentIterations(),
 	})
 	if err != nil {
 		return "", fmt.Errorf("create Eino peer agent: %w", err)
 	}
-	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent, EnableStreaming: true, CheckPointStore: r.store})
-	iterator := runner.Run(ctx, []*schema.Message{userMessage}, adk.WithCheckPointID(fmt.Sprintf("peer:%s:%s:%d:%d", r.session.ID, turn.Spec.CollaborationID, turn.Spec.Round, attempt)))
+	runner := adk.NewRunner(modelContext, adk.RunnerConfig{Agent: agent, EnableStreaming: true, CheckPointStore: r.store})
+	iterator := runner.Run(modelContext, messages, adk.WithCheckPointID(fmt.Sprintf("peer:%s:%s:%d:%d", r.session.ID, turn.Spec.CollaborationID, turn.Spec.Round, attempt)))
 	var finalCandidate string
 	for {
 		item, ok := iterator.Next()
@@ -160,7 +209,7 @@ func (r *sessionRuntime) runPeerMember(
 			if text := strings.TrimSpace(messageText(message)); text != "" {
 				finalCandidate = text
 			}
-			if err := recordUsage(ctx, r.store, r.session.ID, peer.Model, "peer:"+peer.ID, modelSpec, message.ResponseMeta, turn.Spec.ID); err != nil {
+			if err := recordUsage(ctx, r.store, r.session.ID, peer.Model, "peer:"+peer.ID, modelSpec, message, turn.Spec.ID); err != nil {
 				return "", err
 			}
 		case schema.Tool:

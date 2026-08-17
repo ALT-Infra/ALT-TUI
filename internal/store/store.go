@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ import (
 
 type Store struct {
 	db       *sql.DB
+	path     string
 	appendMu sync.Mutex
 	subMu    sync.Mutex
 	subs     map[string]map[*subscriber]struct{}
@@ -84,11 +86,19 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	db.SetMaxOpenConns(8)
-	db.SetMaxIdleConns(4)
-	db.SetConnMaxIdleTime(5 * time.Minute)
+	// SQLite work is local CPU work and ALT serializes event writes. Match the
+	// reader pool to the process's actual parallel execution capacity instead
+	// of assuming a particular machine size; keep those connections warm for
+	// the lifetime of the short-lived application store.
+	connections := max(1, runtime.GOMAXPROCS(0))
+	db.SetMaxOpenConns(connections)
+	db.SetMaxIdleConns(connections)
 
-	s := &Store{db: db, subs: make(map[string]map[*subscriber]struct{})}
+	watchPath := ""
+	if !strings.HasPrefix(path, "file:") {
+		watchPath, _ = filepath.Abs(path)
+	}
+	s := &Store{db: db, path: watchPath, subs: make(map[string]map[*subscriber]struct{})}
 	if err := s.initialize(ctx); err != nil {
 		db.Close()
 		return nil, err

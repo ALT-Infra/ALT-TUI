@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -11,189 +12,222 @@ import (
 	"altv1/internal/tooling"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
-func (r *sessionRuntime) generateLeadDecisionWithTools(
+// generateAgentOutcome runs the current leadership-capable model once. Plain output
+// is the user answer. A deliberately marked coordination object is an ALT
+// control transition. This lets an agent inspect, use tools, and answer in one
+// run without paying for a mandatory planning call and a second synthesis call.
+func (r *sessionRuntime) generateAgentOutcome(
 	ctx context.Context,
-	lead profile.LeadAssignment,
+	agent profile.AgentAssignment,
 	turn int,
 	system string,
-	user string,
-	userMessage *schema.Message,
-	attachmentReferences []string,
-	allowUnstructuredFinalization bool,
-	validate func(LeadDecision) error,
-) (LeadDecision, error) {
-	messages := []*schema.Message{userMessage}
+	exactUserMessage *schema.Message,
+	snapshot string,
+	observedWork int,
+	surface *modelSurface,
+) (AgentOutcome, error) {
+	capabilities := r.providers.Capabilities(r.profile.Gateway, r.profile.Models[agent.Model])
+	instruction := system
+	if capabilities.ToolCalling == provider.CapabilityUnsupported {
+		instruction += coordinationFallbackInstruction
+	}
+
+	messages, snapshotDigest, err := prepareModelSurfaceMessages(
+		surface, instruction, r.session.ID, exactUserMessage, snapshot,
+	)
+	if err != nil {
+		return AgentOutcome{}, err
+	}
 	strategies := []string{"initial", "explicit-correction"}
-	var invalid error
-	var invalidCandidate string
+	var lastInvalid error
 	for index, strategy := range strategies {
-		chat, modelSpec, err := r.providers.Model(ctx, r.profile, lead.Model, provider.Text)
+		modelContext := provider.WithCacheScope(ctx, r.session.ConversationID+":agent:"+agent.ID)
+		chat, modelSpec, err := r.providers.Model(modelContext, r.profile, agent.Model, provider.Text)
 		if err != nil {
-			return LeadDecision{}, err
+			return AgentOutcome{}, err
 		}
-		chat = r.observeModel(lead.Model, "lead:"+lead.ID)(chat)
+		chat = r.observeModel(agent.Model, "agent:"+agent.ID)(chat)
 		var handlers []adk.ChatModelAgentMiddleware
-		instruction := system + `
-If you do not call a runtime tool, your final assistant message must be only
-the required JSON decision. If you call any runtime tool, finish that tool-work
-phase with a concise factual completion report instead; ALT will pass that
-report to a fresh, tool-free structured transition call. Do not mix a
-user-facing answer with a coordination decision.`
-		capabilities := r.providers.Capabilities(r.profile.Gateway, r.profile.Models[lead.Model])
-		if capabilities.ToolCalling == provider.CapabilityUnsupported {
-			instruction += "\nThe authenticated gateway catalog explicitly marks this model as tool-call unsupported. Coordinate using the supplied durable state and delegated members; do not claim to inspect the workspace directly."
-		} else {
-			toolOwner := fmt.Sprintf("lead:%s:%d:%s", lead.ID, turn, strategy)
-			runtimeHandlers, err := r.tools.HandlersWithCompaction(ctx, toolOwner, chat)
+		var toolsConfig adk.ToolsConfig
+		owner := fmt.Sprintf("agent:%s:%d:%s", agent.ID, turn, strategy)
+		if capabilities.ToolCalling != provider.CapabilityUnsupported {
+			coordination, returnDirectly, err := coordinationTools()
 			if err != nil {
-				return LeadDecision{}, err
+				return AgentOutcome{}, err
+			}
+			toolsConfig = adk.ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{Tools: coordination},
+				ReturnDirectly:  returnDirectly,
+			}
+			runtimeHandlers, err := r.tools.HandlersWithCompaction(
+				modelContext, owner, chat,
+				r.providers.Limits(r.profile.Gateway, modelSpec),
+			)
+			if err != nil {
+				return AgentOutcome{}, err
 			}
 			handlers = tooling.AgentHandlers(runtimeHandlers...)
-			instruction += "\nUse inherited runtime tools only when this user task actually depends on workspace contents. Do not explore the workspace for self-contained conceptual or computational requests."
+		} else {
+			handlers, err = r.tools.CompactionHandlers(
+				modelContext, owner, chat,
+				r.providers.Limits(r.profile.Gateway, modelSpec),
+			)
+			if err != nil {
+				return AgentOutcome{}, err
+			}
 		}
-		agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
-			Name: "lead-" + lead.ID, Description: r.profile.LeadDefinition(lead),
-			Instruction: instruction, Model: chat,
-			Handlers:      handlers,
+		handlers = append(handlers, newModelSurfaceHandler(
+			r.store, r.session.ID,
+			r.profile.Gateway+":"+agent.Model+":"+modelSpec.Name,
+			surface, snapshotDigest,
+		))
+
+		runnerAgent, err := adk.NewChatModelAgent(modelContext, &adk.ChatModelAgentConfig{
+			Name: "agent-" + agent.ID, Description: r.profile.AgentDefinition(agent),
+			Instruction: instruction, Model: chat, Handlers: handlers,
+			ToolsConfig:   toolsConfig,
 			MaxIterations: unboundedAgentIterations(),
 		})
 		if err != nil {
-			return LeadDecision{}, fmt.Errorf("create Eino Lead agent: %w", err)
+			return AgentOutcome{}, fmt.Errorf("create active Eino agent: %w", err)
 		}
-		runner := adk.NewRunner(ctx, adk.RunnerConfig{
-			Agent: agent, EnableStreaming: true, CheckPointStore: r.store,
+		runner := adk.NewRunner(modelContext, adk.RunnerConfig{
+			Agent: runnerAgent, EnableStreaming: true, CheckPointStore: r.store,
 		})
-		iterator := runner.Run(
-			ctx,
-			messages,
-			adk.WithCheckPointID(fmt.Sprintf("lead-tools:%s:%d:%s", r.session.ID, turn, strategy)),
-		)
+		iterator := runner.Run(modelContext, messages, adk.WithCheckPointID(
+			fmt.Sprintf("agent:%s:%s:%d:%s", r.session.ID, agent.ID, turn, strategy),
+		))
 		var candidate string
-		var runErr error
-		usedTools := false
+		coordinationToolReturned := false
 		for {
 			item, ok := iterator.Next()
 			if !ok {
 				break
 			}
 			if item.Err != nil {
-				runErr = item.Err
-				break
+				return AgentOutcome{}, item.Err
 			}
 			if item.Output == nil || item.Output.MessageOutput == nil {
 				continue
 			}
 			variant := item.Output.MessageOutput
-			message, err := r.consumeAgentMessage(ctx, variant, "", lead.ID, false)
+			message, err := r.consumeAgentMessage(ctx, variant, "", agent.ID, false)
 			if err != nil {
-				runErr = err
-				break
+				return AgentOutcome{}, err
 			}
 			if message == nil {
 				continue
 			}
 			switch variant.Role {
 			case schema.Assistant:
-				if len(message.ToolCalls) > 0 {
-					usedTools = true
-				}
 				for _, call := range message.ToolCalls {
+					if isCoordinationTool(call.Function.Name) {
+						continue
+					}
 					if _, err := r.store.Append(ctx, r.session.ID, event.Draft{
-						Kind: event.ToolCalled, Actor: lead.ID,
+						Kind: event.ToolCalled, Actor: agent.ID,
 						Data: event.ToolCallData{
 							ToolCallID: call.ID, Tool: call.Function.Name,
 							Provider:  r.tools.ProviderForTool(ctx, call.Function.Name),
 							Arguments: call.Function.Arguments,
 						},
 					}); err != nil {
-						return LeadDecision{}, err
+						return AgentOutcome{}, err
 					}
 				}
 				if text := strings.TrimSpace(messageText(message)); text != "" {
 					candidate = text
 				}
-				if err := recordUsage(
-					ctx, r.store, r.session.ID, lead.Model,
-					"lead:"+lead.ID, modelSpec, message.ResponseMeta,
-				); err != nil {
-					return LeadDecision{}, err
+				if err := recordUsage(ctx, r.store, r.session.ID, agent.Model, "agent:"+agent.ID, modelSpec, message); err != nil {
+					return AgentOutcome{}, err
 				}
 			case schema.Tool:
-				usedTools = true
+				toolName := firstNonEmpty(message.ToolName, variant.ToolName)
+				if isCoordinationTool(toolName) {
+					coordinationToolReturned = true
+					if text := strings.TrimSpace(messageText(message)); text != "" {
+						candidate = text
+					}
+					continue
+				}
 				toolError, failed := tooling.ParseRecoverableToolError(messageText(message))
 				if _, err := r.store.Append(ctx, r.session.ID, event.Draft{
-					Kind: event.ToolCompleted, Actor: lead.ID,
+					Kind: event.ToolCompleted, Actor: agent.ID,
 					Data: event.ToolCompletedData{
 						ToolCallID: message.ToolCallID,
-						Tool:       firstNonEmpty(message.ToolName, variant.ToolName),
-						Failed:     failed,
-						Error:      toolError,
-						Result:     messageText(message),
+						Tool:       toolName,
+						Failed:     failed, Error: toolError, Result: messageText(message),
 					},
 				}); err != nil {
-					return LeadDecision{}, err
+					return AgentOutcome{}, err
 				}
 			}
 		}
-		if runErr != nil {
-			return LeadDecision{}, runErr
-		}
-		if usedTools {
-			transitionSystem := system + `
 
-This is the tool-free coordination transition after the Lead's tool-work phase.
-Use the supplied completion report as evidence. Do not redo the work, do not
-answer the user, and return only the required JSON decision.`
-			transitionUser := user + "\n\nLEAD TOOL-WORK COMPLETION REPORT:\n" + candidate
-			transitionMessage, messageErr := r.richUserMessage(ctx, lead.Model, transitionUser, attachmentReferences)
-			if messageErr != nil {
-				return LeadDecision{}, messageErr
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			lastInvalid = fmt.Errorf("model returned no answer or coordination transition")
+		} else if coordinationToolReturned || looksLikeCoordination(candidate) {
+			decision, err := decodeJSONObject[AgentDecision](candidate)
+			if err == nil {
+				err = validateAgentDecision(decision, observedWork)
 			}
-			decision, transitionErr := generateStructuredMessage[LeadDecision](
-				ctx, r.session.ID, r.store, r.providers, r.profile,
-				lead.Model, "lead:"+lead.ID+":transition",
-				transitionSystem, transitionMessage, validate,
-				r.observeModel(lead.Model, "lead:"+lead.ID+":transition"),
-			)
-			if transitionErr == nil {
-				return decision, nil
+			if err == nil {
+				return AgentOutcome{Decision: &decision}, nil
 			}
-			invalid = transitionErr
-			invalidCandidate = candidate
-			break
+			lastInvalid = err
+		} else {
+			return AgentOutcome{Answer: candidate}, nil
 		}
-		decision, err := decodeJSONObject[LeadDecision](candidate)
-		if err != nil && index > 0 {
-			decision, err = decodeEnvelopedJSONObject[LeadDecision](candidate)
-		}
-		if err == nil && validate != nil {
-			err = validate(decision)
-		}
-		if err == nil {
-			return decision, nil
-		}
-		invalid = err
-		invalidCandidate = candidate
+
 		if index+1 < len(strategies) {
+			messages, _, err = prepareModelSurfaceMessages(
+				surface, instruction, r.session.ID, exactUserMessage, snapshot,
+			)
+			if err != nil {
+				return AgentOutcome{}, err
+			}
 			messages = append(messages, schema.UserMessage(
-				"Your decision cannot advance the session: "+
-					invalid.Error()+
-					". Correct that exact defect. You must either create useful work, wait for work that is actually active, or finalize with a complete brief. Return only the complete required JSON object.",
+				"Your attempted ALT coordination transition was invalid: "+lastInvalid.Error()+
+					". Return either the complete user-facing answer or one corrected kind=coordinate JSON object.",
 			))
 		}
 	}
-	if allowUnstructuredFinalization {
-		brief := strings.TrimSpace(invalidCandidate)
-		if brief != "" {
-			return LeadDecision{
-				Assessment: "Recovered an unstructured Lead completion after all active work ended.",
-				Finalize:   true,
-				FinalBrief: brief,
-			}, nil
-		}
+	return AgentOutcome{}, fmt.Errorf("coordination transition remained invalid after explicit correction: %w", lastInvalid)
+}
+
+func looksLikeCoordination(raw string) bool {
+	var object map[string]json.RawMessage
+	if json.Unmarshal([]byte(raw), &object) != nil {
+		return false
 	}
-	return LeadDecision{}, fmt.Errorf("Lead decision remained invalid after explicit correction: %w", invalid)
+	kind, ok := object["kind"]
+	if !ok {
+		return false
+	}
+	var value string
+	return json.Unmarshal(kind, &value) == nil && value == "coordinate"
+}
+
+func validateAgentDecision(decision AgentDecision, observedWork int) error {
+	if decision.Kind != "coordinate" {
+		return fmt.Errorf("kind must be coordinate")
+	}
+	if strings.TrimSpace(decision.Assessment) == "" {
+		return fmt.Errorf("assessment is empty")
+	}
+	if decision.Handoff != nil && (len(decision.Delegations) > 0 || len(decision.PeerTurns) > 0) {
+		return fmt.Errorf("handoff must be exclusive")
+	}
+	if decision.Handoff != nil && (strings.TrimSpace(decision.Handoff.PeerID) == "" || strings.TrimSpace(decision.Handoff.Reason) == "") {
+		return fmt.Errorf("handoff peer_id and reason are required")
+	}
+	if decision.Handoff == nil && len(decision.Delegations) == 0 && len(decision.PeerTurns) == 0 && observedWork == 0 {
+		return fmt.Errorf("no work, handoff, or answer was produced")
+	}
+	return nil
 }

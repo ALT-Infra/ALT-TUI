@@ -20,7 +20,7 @@ impl Size {
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct Roles {
-    pub(crate) lead: bool,
+    pub(crate) agent: bool,
     pub(crate) callable: bool,
 }
 
@@ -46,17 +46,17 @@ pub(crate) enum EdgeRelation {
 
 #[derive(Clone, Debug)]
 pub(crate) struct Team {
-    pub(crate) router_key: u64,
-    pub(crate) router_size: Size,
+    pub(crate) primary_key: u64,
+    pub(crate) primary_size: Size,
     pub(crate) members: Vec<Member>,
     pub(crate) call_edges: Vec<CallEdge>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LayoutKind {
-    /// A distinguished Router surrounded by one structurally homogeneous,
+    /// A distinguished Primary surrounded by one structurally homogeneous,
     /// strongly connected member orbit.
-    RouterOrbit,
+    PrimaryOrbit,
     /// A directed condensation graph whose components are laid out in ranks.
     LayeredModules,
 }
@@ -88,7 +88,7 @@ pub(crate) fn layout_team(team: &Team) -> Layout {
         && canonical
             .members
             .iter()
-            .all(|member| member.roles.lead && member.roles.callable)
+            .all(|member| member.roles.agent && member.roles.callable)
         && canonical
             .members
             .iter()
@@ -97,7 +97,7 @@ pub(crate) fn layout_team(team: &Team) -> Layout {
 
     let mut positions = physics_positions(team).unwrap_or_else(|| {
         if homogeneous_orbit {
-            layout_router_orbit(&canonical, &sccs[0])
+            layout_primary_orbit(&canonical, &sccs[0])
         } else {
             layout_layered_modules(&canonical, &sccs, &colors)
         }
@@ -118,7 +118,7 @@ pub(crate) fn layout_team(team: &Team) -> Layout {
 
     Layout {
         kind: if homogeneous_orbit {
-            LayoutKind::RouterOrbit
+            LayoutKind::PrimaryOrbit
         } else {
             LayoutKind::LayeredModules
         },
@@ -133,10 +133,10 @@ fn physics_positions(team: &Team) -> Option<BTreeMap<u64, Point>> {
 
     let mut nodes = Vec::with_capacity(team.members.len() + 1);
     nodes.push(physics::Node {
-        id: team.router_key,
+        id: team.primary_key,
         size: physics::Size::new(
-            team.router_size.width as f64,
-            team.router_size.height as f64,
+            team.primary_size.width as f64,
+            team.primary_size.height as f64,
         ),
         pin: physics::Pin::Free,
     });
@@ -149,7 +149,7 @@ fn physics_positions(team: &Team) -> Option<BTreeMap<u64, Point>> {
     let mut next_edge = 0u64;
     let mut edges = Vec::new();
     let mut constraints = vec![physics::AxisConstraint::Position {
-        node: team.router_key,
+        node: team.primary_key,
         axis: physics::Axis::Vertical,
         coordinate: 0.0,
         weight: 30.0,
@@ -167,17 +167,17 @@ fn physics_positions(team: &Team) -> Option<BTreeMap<u64, Point>> {
             target_port: physics::Port::Free,
         });
     };
-    let mut lead_keys: Vec<_> = team
+    let mut agent_keys: Vec<_> = team
         .members
         .iter()
-        .filter(|member| member.roles.lead)
+        .filter(|member| member.roles.agent)
         .map(|member| member.key)
         .collect();
-    lead_keys.sort_unstable();
-    let lead_set: BTreeSet<_> = lead_keys.iter().copied().collect();
-    for &member_key in &lead_keys {
+    agent_keys.sort_unstable();
+    let agent_set: BTreeSet<_> = agent_keys.iter().copied().collect();
+    for &member_key in &agent_keys {
         push_edge(
-            team.router_key,
+            team.primary_key,
             member_key,
             physics::EdgeKind::Directed {
                 target_delta: 190.0,
@@ -186,31 +186,31 @@ fn physics_positions(team: &Team) -> Option<BTreeMap<u64, Point>> {
             1.4,
         );
         constraints.push(physics::AxisConstraint::Offset {
-            source: team.router_key,
+            source: team.primary_key,
             target: member_key,
             axis: physics::Axis::Vertical,
             delta: 190.0,
             weight: 16.0,
         });
-        if member_key != lead_keys[0] {
+        if member_key != agent_keys[0] {
             constraints.push(physics::AxisConstraint::Alignment {
-                first: lead_keys[0],
+                first: agent_keys[0],
                 second: member_key,
                 axis: physics::Axis::Vertical,
                 weight: 20.0,
             });
         }
         constraints.push(physics::AxisConstraint::Separation {
-            before: team.router_key,
+            before: team.primary_key,
             after: member_key,
             axis: physics::Axis::Vertical,
             minimum: 150.0,
             weight: 24.0,
         });
     }
-    for member in team.members.iter().filter(|member| !member.roles.lead) {
+    for member in team.members.iter().filter(|member| !member.roles.agent) {
         constraints.push(physics::AxisConstraint::Separation {
-            before: team.router_key,
+            before: team.primary_key,
             after: member.key,
             axis: physics::Axis::Vertical,
             minimum: 145.0,
@@ -220,29 +220,22 @@ fn physics_positions(team: &Team) -> Option<BTreeMap<u64, Point>> {
     let mut semantic_edges = team.call_edges.clone();
     semantic_edges.sort_unstable();
     for edge in &semantic_edges {
-        let (kind, target_delta, weight) = match edge.relation {
+        let (kind, ideal, weight) = match edge.relation {
             EdgeRelation::Call => (
                 physics::EdgeKind::Directed {
                     target_delta: 190.0,
                 },
-                190.0,
+                230.0,
                 1.0,
             ),
-            // Peer work is bidirectional in conversation, not in authority.
-            // The accountable Lead remains above its stateful contributor;
-            // only the rendered edge and runtime protocol differ from a call.
-            EdgeRelation::Peer => (
-                physics::EdgeKind::Directed {
-                    target_delta: 190.0,
-                },
-                190.0,
-                0.9,
-            ),
+            // A peer relationship grants the same consultation and handoff
+            // authority in both directions. It is an association, never a
+            // hidden parent/child constraint chosen from serialized order.
+            EdgeRelation::Peer => (physics::EdgeKind::Association, 250.0, 0.9),
         };
-        let ideal = if target_delta > 0.0 { 230.0 } else { 250.0 };
         push_edge(edge.from, edge.to, kind, ideal, weight);
         match edge.relation {
-            EdgeRelation::Call if !lead_set.contains(&edge.to) => {
+            EdgeRelation::Call if !agent_set.contains(&edge.to) => {
                 constraints.push(physics::AxisConstraint::Separation {
                     before: edge.from,
                     after: edge.to,
@@ -251,14 +244,7 @@ fn physics_positions(team: &Team) -> Option<BTreeMap<u64, Point>> {
                     weight: 18.0,
                 });
             }
-            EdgeRelation::Call => {}
-            EdgeRelation::Peer => constraints.push(physics::AxisConstraint::Separation {
-                before: edge.from,
-                after: edge.to,
-                axis: physics::Axis::Vertical,
-                minimum: 150.0,
-                weight: 18.0,
-            }),
+            EdgeRelation::Call | EdgeRelation::Peer => {}
         }
     }
     let config = physics::LayoutConfig {
@@ -308,12 +294,12 @@ fn physics_positions(team: &Team) -> Option<BTreeMap<u64, Point>> {
 /// This is the one-free-node reduction of a pinned, boundary-constrained graph
 /// layout. It deliberately does not run a force simulation or move Team nodes.
 pub(crate) fn place_boundary_terminal(team: &Team, layout: &Layout, terminal_size: Size) -> Point {
-    let router_top_left = layout
+    let primary_top_left = layout
         .positions
-        .get(&team.router_key)
+        .get(&team.primary_key)
         .copied()
         .unwrap_or_default();
-    let router_center = center(router_top_left, team.router_size);
+    let primary_center = center(primary_top_left, team.primary_size);
     let members: Vec<_> = team
         .members
         .iter()
@@ -324,27 +310,27 @@ pub(crate) fn place_boundary_terminal(team: &Team, layout: &Layout, terminal_siz
                 key: member.key,
                 center: member_center,
                 size: member.size,
-                lead: member.roles.lead,
+                agent: member.roles.agent,
             })
         })
         .collect();
 
-    let router = CoreNode {
-        key: team.router_key,
-        center: router_center,
-        size: team.router_size,
-        lead: false,
+    let primary = CoreNode {
+        key: team.primary_key,
+        center: primary_center,
+        size: team.primary_size,
+        agent: false,
     };
     let mut core = Vec::with_capacity(members.len() + 1);
-    core.push(router);
+    core.push(primary);
     core.extend(members.iter().copied());
 
     let occupied: Vec<_> = members
         .iter()
         .map(|member| {
             angle_key(
-                (member.center.y - router_center.y) as f64,
-                (member.center.x - router_center.x) as f64,
+                (member.center.y - primary_center.y) as f64,
+                (member.center.x - primary_center.x) as f64,
             )
         })
         .collect();
@@ -362,8 +348,8 @@ pub(crate) fn place_boundary_terminal(team: &Team, layout: &Layout, terminal_siz
             .into_iter()
             .map(|(dx, dy)| {
                 angle_key(
-                    (member.center.y + dy - router_center.y) as f64,
-                    (member.center.x + dx - router_center.x) as f64,
+                    (member.center.y + dy - primary_center.y) as f64,
+                    (member.center.x + dx - primary_center.x) as f64,
                 )
             })
         })
@@ -374,7 +360,7 @@ pub(crate) fn place_boundary_terminal(team: &Team, layout: &Layout, terminal_siz
         .map(|angle| {
             boundary_candidate(
                 angle,
-                router_center,
+                primary_center,
                 terminal_size,
                 &core,
                 &members,
@@ -394,7 +380,7 @@ struct CoreNode {
     key: u64,
     center: Point,
     size: Size,
-    lead: bool,
+    agent: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -493,7 +479,7 @@ fn boundary_candidate_angles(occupied: &[i64], visibility_boundaries: &[i64]) ->
 
 fn boundary_candidate(
     angle: i64,
-    router_center: Point,
+    primary_center: Point,
     terminal_size: Size,
     core: &[CoreNode],
     members: &[CoreNode],
@@ -504,33 +490,33 @@ fn boundary_candidate(
         x: radians.cos() as f32,
         y: radians.sin() as f32,
     };
-    let radius = outside_core_radius(router_center, direction, terminal_size, core);
+    let radius = outside_core_radius(primary_center, direction, terminal_size, core);
     let terminal_center = Point {
-        x: router_center.x + direction.x * radius,
-        y: router_center.y + direction.y * radius,
+        x: primary_center.x + direction.x * radius,
+        y: primary_center.y + direction.y * radius,
     };
     let request_blockers = members
         .iter()
-        .filter(|node| segment_intersects_node(terminal_center, router_center, node))
+        .filter(|node| segment_intersects_node(terminal_center, primary_center, node))
         .count();
 
-    let leads: Vec<_> = members.iter().filter(|node| node.lead).collect();
-    let return_blockers: Vec<_> = leads
+    let agents: Vec<_> = members.iter().filter(|node| node.agent).collect();
+    let return_blockers: Vec<_> = agents
         .iter()
-        .map(|lead| {
+        .map(|agent| {
             core.iter()
-                .filter(|node| node.key != lead.key)
-                .filter(|node| segment_intersects_node(lead.center, terminal_center, node))
+                .filter(|node| node.key != agent.key)
+                .filter(|node| segment_intersects_node(agent.center, terminal_center, node))
                 .count()
         })
         .collect();
     let worst_return_blockers = return_blockers.iter().copied().max().unwrap_or(0);
     let total_return_blockers = return_blockers.iter().sum();
-    let minimum_cycle_sine = leads
+    let minimum_cycle_sine = agents
         .iter()
-        .filter_map(|lead| {
-            let dx = (lead.center.x - router_center.x) as f64;
-            let dy = (lead.center.y - router_center.y) as f64;
+        .filter_map(|agent| {
+            let dx = (agent.center.x - primary_center.x) as f64;
+            let dy = (agent.center.y - primary_center.y) as f64;
             let length = dx.hypot(dy);
             (length > f64::EPSILON).then(|| {
                 ((direction.x as f64 * dy - direction.y as f64 * dx).abs() / length * UNIT_SCALE)
@@ -561,7 +547,7 @@ fn boundary_candidate(
 }
 
 fn outside_core_radius(
-    router_center: Point,
+    primary_center: Point,
     direction: Point,
     terminal_size: Size,
     core: &[CoreNode],
@@ -569,8 +555,8 @@ fn outside_core_radius(
     let core_support = core
         .iter()
         .map(|node| {
-            let delta_x = node.center.x - router_center.x;
-            let delta_y = node.center.y - router_center.y;
+            let delta_x = node.center.x - primary_center.x;
+            let delta_y = node.center.y - primary_center.y;
             delta_x * direction.x + delta_y * direction.y + rectangle_support(node.size, direction)
         })
         .fold(0.0_f32, f32::max);
@@ -615,13 +601,13 @@ fn center(top_left: Point, size: Size) -> Point {
     }
 }
 
-fn layout_router_orbit(team: &CanonicalTeam, component: &[usize]) -> BTreeMap<u64, Point> {
+fn layout_primary_orbit(team: &CanonicalTeam, component: &[usize]) -> BTreeMap<u64, Point> {
     let mut positions = BTreeMap::new();
     let order = optimized_orbit_order(component, &team.members, &team.edges);
-    let radius = orbit_radius(&order, &team.members, Some(team.router_size), NODE_GAP);
+    let radius = orbit_radius(&order, &team.members, Some(team.primary_size), NODE_GAP);
     positions.insert(
-        team.router_key,
-        top_left(Point::default(), team.router_size),
+        team.primary_key,
+        top_left(Point::default(), team.primary_size),
     );
     place_orbit(
         &mut positions,
@@ -640,8 +626,8 @@ fn layout_layered_modules(
 ) -> BTreeMap<u64, Point> {
     if team.members.is_empty() {
         return BTreeMap::from([(
-            team.router_key,
-            top_left(Point::default(), team.router_size),
+            team.primary_key,
+            top_left(Point::default(), team.primary_size),
         )]);
     }
 
@@ -669,10 +655,10 @@ fn layout_layered_modules(
 
     let max_rank = ranks.iter().copied().max().unwrap_or(0);
     let mut positions = BTreeMap::new();
-    let mut previous_bottom = team.router_size.height * 0.5;
+    let mut previous_bottom = team.primary_size.height * 0.5;
     positions.insert(
-        team.router_key,
-        top_left(Point::default(), team.router_size),
+        team.primary_key,
+        top_left(Point::default(), team.primary_size),
     );
 
     for rank in 0..=max_rank {
@@ -852,8 +838,8 @@ fn center_positions(team: &CanonicalTeam, positions: &mut BTreeMap<u64, Point>) 
         y: f32::NEG_INFINITY,
     };
     for (&key, point) in positions.iter() {
-        let size = if key == team.router_key {
-            team.router_size
+        let size = if key == team.primary_key {
+            team.primary_size
         } else {
             team.members
                 .iter()
@@ -880,8 +866,8 @@ fn center_positions(team: &CanonicalTeam, positions: &mut BTreeMap<u64, Point>) 
 }
 
 struct CanonicalTeam {
-    router_key: u64,
-    router_size: Size,
+    primary_key: u64,
+    primary_size: Size,
     members: Vec<Member>,
     edges: Vec<(usize, usize)>,
 }
@@ -895,17 +881,24 @@ impl CanonicalTeam {
             .enumerate()
             .map(|(index, member)| (member.key, index))
             .collect();
-        let mut edges: Vec<_> = team
-            .call_edges
-            .iter()
-            .filter_map(|edge| Some((*index.get(&edge.from)?, *index.get(&edge.to)?)))
-            .filter(|(from, to)| from != to)
-            .collect();
+        let mut edges = Vec::new();
+        for edge in &team.call_edges {
+            let (Some(&from), Some(&to)) = (index.get(&edge.from), index.get(&edge.to)) else {
+                continue;
+            };
+            if from == to {
+                continue;
+            }
+            edges.push((from, to));
+            if edge.relation == EdgeRelation::Peer {
+                edges.push((to, from));
+            }
+        }
         edges.sort_unstable();
         edges.dedup();
         Self {
-            router_key: team.router_key,
-            router_size: team.router_size,
+            primary_key: team.primary_key,
+            primary_size: team.primary_size,
             members,
             edges,
         }
@@ -916,7 +909,7 @@ fn structural_colors(team: &CanonicalTeam) -> BTreeMap<u64, usize> {
     let mut colors: Vec<usize> = team
         .members
         .iter()
-        .map(|member| match (member.roles.lead, member.roles.callable) {
+        .map(|member| match (member.roles.agent, member.roles.callable) {
             (false, false) => 0,
             (true, false) => 1,
             (false, true) => 2,
@@ -1185,21 +1178,21 @@ impl<I: Iterator> IteratorAllEqual for I {}
 mod tests {
     use super::*;
 
-    fn member(key: u64, lead: bool, callable: bool) -> Member {
+    fn member(key: u64, agent: bool, callable: bool) -> Member {
         Member {
             key,
             size: Size {
                 width: 220.0,
                 height: 92.0,
             },
-            roles: Roles { lead, callable },
+            roles: Roles { agent, callable },
         }
     }
 
     fn complete_team(keys: &[u64]) -> Team {
         Team {
-            router_key: 1,
-            router_size: Size {
+            primary_key: 1,
+            primary_size: Size {
                 width: 180.0,
                 height: 72.0,
             },
@@ -1220,15 +1213,15 @@ mod tests {
     }
 
     #[test]
-    fn physics_layout_preserves_router_flow_and_clearance_for_a_dense_cycle() {
+    fn physics_layout_preserves_primary_flow_and_clearance_for_a_dense_cycle() {
         let team = complete_team(&[100, 101, 102, 103, 104, 105]);
         let layout = layout_team(&team);
-        assert_eq!(layout.kind, LayoutKind::RouterOrbit);
+        assert_eq!(layout.kind, LayoutKind::PrimaryOrbit);
 
-        let router = layout.positions[&team.router_key];
-        let router_center = Point {
-            x: router.x + team.router_size.width * 0.5,
-            y: router.y + team.router_size.height * 0.5,
+        let primary = layout.positions[&team.primary_key];
+        let primary_center = Point {
+            x: primary.x + team.primary_size.width * 0.5,
+            y: primary.y + team.primary_size.height * 0.5,
         };
         let mut centers = Vec::new();
         for node in &team.members {
@@ -1241,7 +1234,9 @@ mod tests {
                 },
             ));
         }
-        assert!(centers.iter().all(|(_, center)| center.y > router_center.y));
+        assert!(centers
+            .iter()
+            .all(|(_, center)| center.y > primary_center.y));
 
         let rect = |key: u64, size: Size| {
             let point = layout.positions[&key];
@@ -1252,7 +1247,7 @@ mod tests {
                 point.y + size.height + NODE_GAP * 0.5,
             )
         };
-        let mut boxes = vec![(team.router_key, rect(team.router_key, team.router_size))];
+        let mut boxes = vec![(team.primary_key, rect(team.primary_key, team.primary_size))];
         boxes.extend(
             team.members
                 .iter()
@@ -1277,6 +1272,44 @@ mod tests {
     }
 
     #[test]
+    fn peer_endpoint_order_cannot_create_a_hidden_authority_rank() {
+        let base = Team {
+            primary_key: 1,
+            primary_size: Size {
+                width: 180.0,
+                height: 72.0,
+            },
+            members: vec![
+                member(100, true, false),
+                member(101, true, false),
+                member(102, true, false),
+            ],
+            call_edges: vec![
+                CallEdge {
+                    from: 100,
+                    to: 101,
+                    relation: EdgeRelation::Peer,
+                },
+                CallEdge {
+                    from: 101,
+                    to: 102,
+                    relation: EdgeRelation::Peer,
+                },
+            ],
+        };
+        let mut reversed = base.clone();
+        for edge in &mut reversed.call_edges {
+            std::mem::swap(&mut edge.from, &mut edge.to);
+        }
+
+        let a = layout_team(&base);
+        let b = layout_team(&reversed);
+        assert_eq!(a.positions, b.positions);
+        assert_eq!(a.components, b.components);
+        assert_eq!(a.colors, b.colors);
+    }
+
+    #[test]
     fn boundary_terminal_forms_an_unoccluded_cycle_beside_a_two_member_orbit() {
         let team = complete_team(&[100, 101]);
         let layout = layout_team(&team);
@@ -1285,7 +1318,7 @@ mod tests {
             height: 72.0,
         };
         let terminal = place_boundary_terminal(&team, &layout, terminal_size);
-        let router = center(layout.positions[&team.router_key], team.router_size);
+        let primary = center(layout.positions[&team.primary_key], team.primary_size);
         let terminal_center = center(terminal, terminal_size);
         let members: Vec<_> = team
             .members
@@ -1294,15 +1327,15 @@ mod tests {
             .collect();
 
         assert!(
-            terminal_center.x < router.x,
+            terminal_center.x < primary.x,
             "input-side tie-break was not left"
         );
-        assert!((terminal_center.y - router.y).abs() < 0.001);
+        assert!((terminal_center.y - primary.y).abs() < 0.001);
         let core: Vec<_> = std::iter::once(CoreNode {
-            key: team.router_key,
-            center: router,
-            size: team.router_size,
-            lead: false,
+            key: team.primary_key,
+            center: primary,
+            size: team.primary_size,
+            agent: false,
         })
         .chain(
             team.members
@@ -1312,28 +1345,28 @@ mod tests {
                     key: member.key,
                     center: *center,
                     size: member.size,
-                    lead: member.roles.lead,
+                    agent: member.roles.agent,
                 }),
         )
         .collect();
         assert!(core[1..].iter().all(|node| !segment_intersects_node(
             terminal_center,
-            router,
+            primary,
             node
         )));
-        for lead in &core[1..] {
+        for agent in &core[1..] {
             assert!(core
                 .iter()
-                .filter(|node| node.key != lead.key)
-                .all(|node| { !segment_intersects_node(lead.center, terminal_center, node) }));
+                .filter(|node| node.key != agent.key)
+                .all(|node| { !segment_intersects_node(agent.center, terminal_center, node) }));
         }
     }
 
     #[test]
-    fn boundary_terminal_keeps_layered_flow_cycles_off_the_router_axis() {
+    fn boundary_terminal_keeps_layered_flow_cycles_off_the_primary_axis() {
         let team = Team {
-            router_key: 1,
-            router_size: Size {
+            primary_key: 1,
+            primary_size: Size {
                 width: 180.0,
                 height: 72.0,
             },
@@ -1347,35 +1380,35 @@ mod tests {
             height: 72.0,
         };
         let terminal = place_boundary_terminal(&team, &layout, terminal_size);
-        let router = center(layout.positions[&team.router_key], team.router_size);
+        let primary = center(layout.positions[&team.primary_key], team.primary_size);
         let terminal_center = center(terminal, terminal_size);
-        assert!((terminal_center.x - router.x).abs() > 1.0);
+        assert!((terminal_center.x - primary.x).abs() > 1.0);
         for member in &team.members {
-            let lead = CoreNode {
+            let agent = CoreNode {
                 key: member.key,
                 center: center(layout.positions[&member.key], member.size),
                 size: member.size,
-                lead: true,
+                agent: true,
             };
-            let router_node = CoreNode {
-                key: team.router_key,
-                center: router,
-                size: team.router_size,
-                lead: false,
+            let primary_node = CoreNode {
+                key: team.primary_key,
+                center: primary,
+                size: team.primary_size,
+                agent: false,
             };
             assert!(!segment_intersects_node(
-                lead.center,
+                agent.center,
                 terminal_center,
-                &router_node
+                &primary_node
             ));
         }
     }
 
     #[test]
-    fn one_lead_does_not_collapse_request_and_return_into_one_line() {
+    fn one_agent_does_not_collapse_request_and_return_into_one_line() {
         let team = Team {
-            router_key: 1,
-            router_size: Size {
+            primary_key: 1,
+            primary_size: Size {
                 width: 180.0,
                 height: 72.0,
             },
@@ -1388,19 +1421,19 @@ mod tests {
             height: 72.0,
         };
         let terminal = place_boundary_terminal(&team, &layout, terminal_size);
-        let router = center(layout.positions[&team.router_key], team.router_size);
-        let lead = center(layout.positions[&100], team.members[0].size);
+        let primary = center(layout.positions[&team.primary_key], team.primary_size);
+        let agent = center(layout.positions[&100], team.members[0].size);
         let terminal = center(terminal, terminal_size);
-        let cross = (lead.x - router.x) * (terminal.y - router.y)
-            - (lead.y - router.y) * (terminal.x - router.x);
+        let cross = (agent.x - primary.x) * (terminal.y - primary.y)
+            - (agent.y - primary.y) * (terminal.x - primary.x);
         assert!(cross.abs() > 1.0, "the visible flow cycle is collinear");
-        let router_node = CoreNode {
-            key: team.router_key,
-            center: router,
-            size: team.router_size,
-            lead: false,
+        let primary_node = CoreNode {
+            key: team.primary_key,
+            center: primary,
+            size: team.primary_size,
+            agent: false,
         };
-        assert!(!segment_intersects_node(lead, terminal, &router_node));
+        assert!(!segment_intersects_node(agent, terminal, &primary_node));
     }
 
     #[test]
@@ -1428,16 +1461,16 @@ mod tests {
             height: 72.0,
         };
         let terminal = place_boundary_terminal(&team, &layout, terminal_size);
-        let router = center(layout.positions[&team.router_key], team.router_size);
+        let primary = center(layout.positions[&team.primary_key], team.primary_size);
         let terminal = center(terminal, terminal_size);
         for member in &team.members {
             let obstacle = CoreNode {
                 key: member.key,
                 center: center(layout.positions[&member.key], member.size),
                 size: member.size,
-                lead: true,
+                agent: true,
             };
-            assert!(!segment_intersects_node(terminal, router, &obstacle));
+            assert!(!segment_intersects_node(terminal, primary, &obstacle));
         }
     }
 
@@ -1460,8 +1493,8 @@ mod tests {
                 terminal_size,
             );
             let core = std::iter::once((
-                center(layout.positions[&team.router_key], team.router_size),
-                team.router_size,
+                center(layout.positions[&team.primary_key], team.primary_size),
+                team.primary_size,
             ))
             .chain(team.members.iter().map(|member| {
                 (

@@ -30,9 +30,9 @@ func TestMessageTextIncludesStructuredMultiContent(t *testing.T) {
 	message := schema.AssistantMessage("", nil)
 	message.AssistantGenMultiContent = []schema.MessageOutputPart{{
 		Type: schema.ChatMessagePartTypeText,
-		Text: `{"lead_id":"engineering"}`,
+		Text: `{"agent_id":"engineering"}`,
 	}}
-	if got := messageText(message); got != `{"lead_id":"engineering"}` {
+	if got := messageText(message); got != `{"agent_id":"engineering"}` {
 		t.Fatalf("messageText = %q", got)
 	}
 }

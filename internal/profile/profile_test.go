@@ -8,110 +8,121 @@ import (
 	builtinprofiles "altv1/profiles"
 )
 
-func TestBuiltInProfileUsesExactCatalogIdentitiesAndExplicitCallEdges(t *testing.T) {
-	document := builtIn(t)
-	p := document.Profile
-	if p.Schema != profile.CurrentSchema {
-		t.Fatalf("built-in schema = %d, want %d", p.Schema, profile.CurrentSchema)
+func TestBuiltInProfileUsesRouterlessRolesAndUniqueCatalogModels(t *testing.T) {
+	p := builtIn(t, builtinprofiles.Engineering).Profile
+	if p.Schema != profile.CurrentSchema || p.Primary.ID == "" || p.Gateway == "" {
+		t.Fatalf("incomplete built-in Team: %#v", p)
 	}
-	if p.Router.Definition == "" {
-		t.Fatal("Router definition is empty")
-	}
-	if p.Gateway == "" {
-		t.Fatal("Team gateway is empty")
-	}
-
 	owners := map[string]string{}
-	register := func(memberID, alias string) {
+	register := func(memberID, alias, definition string) {
 		t.Helper()
 		selected := p.Models[alias]
-		if selected.Route == "" || selected.Name == "" {
-			t.Fatalf("%s has incomplete catalog identity: %#v", alias, selected)
+		if selected.Route == "" || selected.Name == "" || definition == "" {
+			t.Fatalf("%s has an incomplete assignment", memberID)
 		}
 		identity := profile.ModelIdentity(selected)
-		if owner, exists := owners[identity]; exists && owner != memberID {
+		if owner := owners[identity]; owner != "" && owner != memberID {
 			t.Fatalf("catalog model %s is assigned to both %s and %s", selected.Name, owner, memberID)
 		}
 		owners[identity] = memberID
 	}
-	register("$router", p.Router.Model)
-	for _, lead := range p.Leads {
-		register(lead.ID, lead.Model)
-		if lead.Definition == "" {
-			t.Fatalf("Lead %s definition is empty", lead.ID)
-		}
+	for _, agent := range p.Agents() {
+		register(agent.ID, agent.Model, agent.Definition)
 	}
-	for _, member := range p.Members {
-		register(member.ID, member.Model)
-		if member.Definition == "" {
-			t.Fatalf("member %s definition is empty", member.ID)
-		}
-	}
-
-	engineering, _ := p.Lead("engineering-lead")
-	research, _ := p.Lead("research-lead")
-	if !contains(engineering.Calls, "research-specialist") ||
-		!contains(engineering.Peers, "research-specialist") ||
-		!contains(research.Calls, "technical-specialist") ||
-		!contains(research.Peers, "technical-specialist") {
-		t.Fatal("specialist call and peer edges are missing")
+	for _, specialist := range p.Specialists {
+		register(specialist.ID, specialist.Model, specialist.Definition)
 	}
 }
 
-func TestDifferentMembersCannotShareExactCatalogIdentity(t *testing.T) {
-	document := builtIn(t)
-	document.Profile.Members = append(document.Profile.Members, profile.MemberAssignment{
-		ID: "duplicate", Model: document.Profile.Leads[0].Model,
-		Definition: "This definition is structurally valid.",
+func TestBundledFreeTeamsContainOnlyExplicitFreeCatalogModels(t *testing.T) {
+	for _, fixture := range []struct {
+		name   string
+		source []byte
+	}{
+		{name: "general", source: builtinprofiles.Free},
+		{name: "engineering", source: builtinprofiles.Engineering},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			p := builtIn(t, fixture.source).Profile
+			for alias, selected := range p.Models {
+				if selected.Route != "zen" || !strings.HasSuffix(selected.Name, "-free") {
+					t.Fatalf("model %s is not an explicit OpenCode free-catalog identity: %#v", alias, selected)
+				}
+			}
+		})
+	}
+}
+
+func TestDifferentAssignmentsCannotShareExactCatalogIdentity(t *testing.T) {
+	document := builtIn(t, builtinprofiles.Engineering)
+	document.Profile.Specialists = append(document.Profile.Specialists, profile.SpecialistAssignment{
+		ID: "duplicate", Model: document.Profile.Primary.Model,
+		Definition: "Perform one bounded, thoroughly stateless check.",
 	})
+	document.Profile.Primary.Specialists = append(document.Profile.Primary.Specialists, "duplicate")
 	diagnostics := profile.Validate(document.Profile)
 	if !hasDiagnostic(diagnostics, profile.Error, "one model is one Team member") {
 		t.Fatalf("duplicate catalog identity was not rejected: %#v", diagnostics)
 	}
 }
 
-func TestLeadCannotCallItself(t *testing.T) {
-	document := builtIn(t)
-	document.Profile.Leads[1].Calls = []string{"research-lead"}
-	diagnostics := profile.Validate(document.Profile)
-	if !hasDiagnostic(diagnostics, profile.Error, "cannot call itself") {
-		t.Fatalf("self-call was not rejected: %#v", diagnostics)
+func TestPeerRelationshipIsUndirectedAndLeadershipCapable(t *testing.T) {
+	p := builtIn(t, builtinprofiles.Engineering).Profile
+	if len(p.Peers) == 0 {
+		t.Fatal("fixture needs one purposeful peer")
+	}
+	peer := p.Peers[0]
+	if _, ok := p.PeerAgentFor(p.Primary, peer.ID); !ok {
+		t.Fatal("primary cannot reach declared peer")
+	}
+	if _, ok := p.PeerAgentFor(peer, p.Primary.ID); !ok {
+		t.Fatal("peer relationship is not reciprocal")
 	}
 }
 
-func TestLeadCannotBeUsedAsContributorOrPeer(t *testing.T) {
-	document := builtIn(t)
-	document.Profile.Leads[0].Calls = []string{"research-lead"}
-	document.Profile.Leads[0].Peers = []string{"research-lead"}
-	diagnostics := profile.Validate(document.Profile)
-	if !hasDiagnostic(diagnostics, profile.Error, "exclusive roles") {
-		t.Fatalf("Lead/contributor dual role was not rejected: %#v", diagnostics)
+func TestSpecialistCanBeSharedButRemainsOutsidePeerGraph(t *testing.T) {
+	p := builtIn(t, builtinprofiles.Engineering).Profile
+	shared := p.Specialists[0].ID
+	p.Primary.Specialists = appendUnique(p.Primary.Specialists, shared)
+	p.Peers[0].Specialists = appendUnique(p.Peers[0].Specialists, shared)
+	if diagnostics := profile.Validate(p); profile.HasErrors(diagnostics) {
+		t.Fatalf("shared specialist was rejected: %#v", diagnostics)
+	}
+	if _, ok := p.SpecialistFor(p.Primary, shared); !ok {
+		t.Fatal("primary cannot call shared specialist")
+	}
+	if _, ok := p.SpecialistFor(p.Peers[0], shared); !ok {
+		t.Fatal("peer cannot call shared specialist")
+	}
+	p.Primary.Peers = append(p.Primary.Peers, shared)
+	if !hasDiagnostic(profile.Validate(p), profile.Error, "unknown leadership-capable peer") {
+		t.Fatal("stateless specialist was admitted to the peer/leadership graph")
 	}
 }
 
 func TestDefinitionsRoundTripVerbatim(t *testing.T) {
-	document := builtIn(t)
+	document := builtIn(t, builtinprofiles.Engineering)
 	const definition = "Start with the whole request.\n\n## What matters here\n\nFollow the evidence."
-	document.Profile.Leads[0].Definition = definition
+	document.Profile.Primary.Definition = definition
 	roundTrip, err := profile.FromValue(document.Profile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if actual := roundTrip.Profile.Leads[0].Definition; actual != definition {
+	if actual := roundTrip.Profile.Primary.Definition; actual != definition {
 		t.Fatalf("definition changed:\nwant %q\ngot  %q", definition, actual)
 	}
 }
 
-func TestOldSchemaAndOldFieldsAreRejected(t *testing.T) {
-	source := strings.Replace(string(builtinprofiles.Engineering), "schema: 1", "schema: 4", 1)
+func TestOldSchemaAndRouterFieldsAreRejected(t *testing.T) {
+	source := strings.Replace(string(builtinprofiles.Engineering), "schema: 2", "schema: 1", 1)
 	if document, err := profile.Parse([]byte(source)); err != nil {
 		t.Fatal(err)
 	} else if !profile.HasErrors(profile.Validate(document.Profile)) {
 		t.Fatal("removed schema was accepted")
 	}
-	source = string(builtinprofiles.Engineering) + "\nlegacy_limits: true\n"
+	source = string(builtinprofiles.Engineering) + "\nrouter: {model: obsolete}\n"
 	if _, err := profile.Parse([]byte(source)); err == nil {
-		t.Fatal("unknown legacy field was accepted")
+		t.Fatal("removed router field was accepted")
 	}
 }
 
@@ -136,14 +147,14 @@ func TestLegacyMixedGatewaysCannotBecomeATeam(t *testing.T) {
 	source := strings.Replace(string(builtinprofiles.Engineering), "gateway: opencode\n", "", 1)
 	source = strings.ReplaceAll(source, "    route:", "    gateway: opencode\n    route:")
 	source = strings.Replace(source, "    gateway: opencode\n", "    gateway: cline\n", 1)
-	if _, err := profile.Parse([]byte(source)); err == nil || !strings.Contains(err.Error(), "multiple") && !strings.Contains(err.Error(), "not Team gateway") {
+	if _, err := profile.Parse([]byte(source)); err == nil || !strings.Contains(err.Error(), "not Team gateway") {
 		t.Fatalf("legacy mixed-gateway profile was accepted: %v", err)
 	}
 }
 
-func builtIn(t *testing.T) *profile.Document {
+func builtIn(t *testing.T, source []byte) *profile.Document {
 	t.Helper()
-	document, err := profile.Parse(builtinprofiles.Engineering)
+	document, err := profile.Parse(source)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,13 +164,13 @@ func builtIn(t *testing.T) *profile.Document {
 	return document
 }
 
-func contains(values []string, expected string) bool {
+func appendUnique(values []string, expected string) []string {
 	for _, value := range values {
 		if value == expected {
-			return true
+			return values
 		}
 	}
-	return false
+	return append(values, expected)
 }
 
 func hasDiagnostic(values []profile.Diagnostic, severity profile.Severity, fragment string) bool {

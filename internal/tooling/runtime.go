@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"github.com/cloudwego/eino/schema"
 )
 
 const toolOutputPathPrefix = "alt-tool-output://"
@@ -31,8 +33,51 @@ type Runtime struct {
 	processes  *processManager
 	options    RuntimeOptions
 	outputSeq  atomic.Uint64
+	budgetMu   sync.RWMutex
+	budgets    map[string]*contextBudget
 	closeOnce  sync.Once
 	closeErr   error
+}
+
+func (r *Runtime) setContextBudget(owner string, budget *contextBudget) {
+	if r == nil || budget == nil {
+		return
+	}
+	r.budgetMu.Lock()
+	if r.budgets == nil {
+		r.budgets = make(map[string]*contextBudget)
+	}
+	r.budgets[owner] = budget
+	r.budgetMu.Unlock()
+}
+
+func (r *Runtime) modelVisibleProcessBytes(owner string) int {
+	if r == nil {
+		return 0
+	}
+	r.budgetMu.RLock()
+	budget := r.budgets[owner]
+	r.budgetMu.RUnlock()
+	if budget == nil {
+		return 0
+	}
+	// One byte per token is the conservative pre-calibration bound used by the
+	// shared context budget. A zero result means the gateway ceiling is still
+	// honestly unknown, not that process output is unlimited by policy.
+	return budget.hardPromptCapacity(0)
+}
+
+func (r *Runtime) modelVisibleResultBytes(owner string) (int, bool) {
+	if r == nil {
+		return 0, false
+	}
+	r.budgetMu.RLock()
+	budget := r.budgets[owner]
+	r.budgetMu.RUnlock()
+	if budget == nil {
+		return 0, false
+	}
+	return budget.availableResultBytes()
 }
 
 type RuntimeOptions struct {
@@ -47,10 +92,25 @@ type RuntimeOptions struct {
 	BrowseContext           func(context.Context, string, ContextBrowseInput) (ContextBrowseResult, error)
 	OpenContext             func(context.Context, string, ContextOpenInput) (ContextOpenResult, error)
 	ArchiveToolOutput       func(context.Context, string, string, []byte) error
-	RecordAgentCompaction   func(context.Context, string, string, int, int) error
+	RecordAgentCompaction   func(context.Context, AgentCompactionRecord) error
 	ResolveResearchProvider func(context.Context) (string, error)
 	ResolveExaCredential    func() (string, error)
 	ResolveLinkupCredential func() (string, error)
+}
+
+// AgentCompactionRecord explains a lossy working-view transition while its
+// TranscriptReference preserves the exact pre-transition evidence. Token
+// fields are measurements derived for this call, not user-authored settings.
+type AgentCompactionRecord struct {
+	Scope               string
+	Trigger             string
+	TranscriptReference string
+	MessagesBefore      int
+	MessagesAfter       int
+	EstimatedTokens     int
+	PromptCapacity      int
+	HighWater           int
+	Summary             *schema.Message
 }
 
 func NewRuntime(parent context.Context, workspace string) (*Runtime, error) {

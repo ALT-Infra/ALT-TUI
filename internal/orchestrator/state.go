@@ -20,11 +20,6 @@ const (
 	DelegationCancelled DelegationStatus = "cancelled"
 )
 
-const (
-	projectionTraceLimit       = 64
-	projectionInstructionLimit = 64
-)
-
 type Delegation struct {
 	Spec            event.DelegationSpec
 	SpecReference   string
@@ -69,10 +64,8 @@ type Projection struct {
 	UserInstructionsArchived  int
 	ObservableTrace           []ConversationTrace
 	ObservableTraceArchived   int
-	LeadID                    string
-	LeadConfidence            float64
-	LeadBasis                 string
-	LeadTurns                 int
+	LeaderID                  string
+	AgentTurns                int
 	Delegations               map[string]*Delegation
 	PeerTurns                 map[string]*PeerTurn
 	FinalAnswer               string
@@ -91,7 +84,7 @@ type ConversationTurn struct {
 	Answer          string              `json:"answer,omitempty"`
 	AnswerReference string              `json:"answer_reference,omitempty"`
 	Status          string              `json:"status"`
-	LeadID          string              `json:"lead_id,omitempty"`
+	LeaderID        string              `json:"leader_id,omitempty"`
 	ObservableTrace []ConversationTrace `json:"observable_trace,omitempty"`
 }
 
@@ -148,28 +141,19 @@ func (p *Projection) Apply(item event.Event) error {
 		}
 		p.UserInstructionInputs = append(p.UserInstructionInputs, input)
 		p.UserInstructionReferences = append(p.UserInstructionReferences, store.ContextReferenceForEvent(item))
-		if len(p.UserInstructions) > projectionInstructionLimit {
-			remove := len(p.UserInstructions) - projectionInstructionLimit
-			p.UserInstructions = append([]string(nil), p.UserInstructions[remove:]...)
-			p.UserInstructionInputs = append([]content.Input(nil), p.UserInstructionInputs[remove:]...)
-			p.UserInstructionReferences = append([]string(nil), p.UserInstructionReferences[remove:]...)
-			p.UserInstructionsArchived += remove
-		}
-	case event.LeadSelected:
-		data, err := event.Decode[event.LeadSelectedData](item)
+	case event.LeadershipTransferred:
+		data, err := event.Decode[event.LeadershipTransferredData](item)
 		if err != nil {
 			return err
 		}
-		p.LeadID = data.LeadID
-		p.LeadConfidence = data.Confidence
-		p.LeadBasis = data.Basis
-	case event.LeadTurnStarted:
-		data, err := event.Decode[event.LeadTurnData](item)
+		p.LeaderID = data.ToAgentID
+	case event.AgentTurnStarted:
+		data, err := event.Decode[event.AgentTurnData](item)
 		if err != nil {
 			return err
 		}
-		if data.Turn > p.LeadTurns {
-			p.LeadTurns = data.Turn
+		if data.Turn > p.AgentTurns {
+			p.AgentTurns = data.Turn
 		}
 	case event.ToolCalled, event.ToolCompleted:
 		p.ObservableTrace = append(p.ObservableTrace, ConversationTrace{
@@ -177,11 +161,6 @@ func (p *Projection) Apply(item event.Event) error {
 			Kind: item.Kind, Actor: item.Actor, CorrelationID: item.CorrelationID,
 			Data: append(json.RawMessage(nil), item.Data...),
 		})
-		if len(p.ObservableTrace) > projectionTraceLimit {
-			remove := len(p.ObservableTrace) - projectionTraceLimit
-			p.ObservableTrace = append([]ConversationTrace(nil), p.ObservableTrace[remove:]...)
-			p.ObservableTraceArchived += remove
-		}
 	case event.DelegationCreated:
 		data, err := event.Decode[event.DelegationSpec](item)
 		if err != nil {
@@ -344,7 +323,7 @@ func (p *Projection) ActiveCount() int {
 
 // WorkCount includes active work and work whose process was interrupted before
 // it could record a semantic result. Actual gateway/model failures are evidence
-// returned to the Lead and are never silently repeated.
+// returned to the leader and are never silently repeated.
 func (p *Projection) WorkCount() int {
 	count := 0
 	for _, delegation := range p.Delegations {

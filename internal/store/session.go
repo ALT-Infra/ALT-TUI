@@ -32,7 +32,7 @@ type Session struct {
 	Title           string
 	Task            string
 	Workspace       string
-	LeadID          string
+	LeaderID        string
 	Status          SessionStatus
 	FinalAnswer     string
 	CreatedAt       time.Time
@@ -345,7 +345,7 @@ type scanner interface {
 
 func scanSession(row scanner) (*Session, error) {
 	var item Session
-	var lead, answer sql.NullString
+	var leader, answer sql.NullString
 	var status, created, updated string
 	if err := row.Scan(
 		&item.ID,
@@ -356,7 +356,7 @@ func scanSession(row scanner) (*Session, error) {
 		&item.Title,
 		&item.Task,
 		&item.Workspace,
-		&lead,
+		&leader,
 		&status,
 		&answer,
 		&created,
@@ -367,7 +367,7 @@ func scanSession(row scanner) (*Session, error) {
 		}
 		return nil, fmt.Errorf("scan session: %w", err)
 	}
-	item.LeadID = scanNullableString(lead)
+	item.LeaderID = scanNullableString(leader)
 	item.FinalAnswer = scanNullableString(answer)
 	item.Status = SessionStatus(status)
 	item.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
@@ -546,10 +546,9 @@ func (s *Store) PromptAt(
 }
 
 func defaultSessionTitle(task string) string {
-	title := strings.Join(strings.Fields(task), " ")
-	const limit = 72
-	if len(title) <= limit {
-		return title
-	}
-	return strings.TrimSpace(title[:limit-1]) + "…"
+	// Titles are canonical conversation metadata. Persist the complete
+	// normalized value and let each UI truncate it to its measured geometry;
+	// a storage-layer display width silently destroyed information and could
+	// not adapt to a terminal, native window, or future client.
+	return strings.Join(strings.Fields(task), " ")
 }

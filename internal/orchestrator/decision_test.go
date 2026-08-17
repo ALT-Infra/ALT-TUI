@@ -1,66 +1,54 @@
 package orchestrator
 
-import (
-	"strings"
-	"testing"
+import "testing"
 
-	"altv1/internal/profile"
-)
-
-func TestRouterDecisionRequiresTheDeclaredWireContract(t *testing.T) {
-	decision, err := decodeJSONObject[RouterDecision](
-		`{"lead_id":"engineering-lead","confidence":0.9,"basis":"Engineering owns the deliverable."}`,
-	)
+func TestCoordinateDecisionUsesExplicitWireDiscriminator(t *testing.T) {
+	decision, err := decodeJSONObject[AgentDecision](`{
+  "kind":"coordinate",
+  "assessment":"The blind coding primary needs the image transcribed.",
+  "delegations":[{"key":"inspect-screenshot","specialist_id":"vision","objective":"Read every visible compiler error from the screenshot.","attachments":["image-1"]}],
+  "peer_turns":[],"cancel":[],"handoff":null
+}`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decision.Basis != "Engineering owns the deliverable." {
-		t.Fatalf("basis = %q", decision.Basis)
+	if err := validateAgentDecision(decision, 0); err != nil {
+		t.Fatal(err)
 	}
-	for _, invalid := range []string{
-		`{"lead_id":"engineering-lead","confidence":0.9,"decision_basis":"alias"}`,
-		`explanation before {"lead_id":"engineering-lead","confidence":0.9,"basis":"embedded"} explanation after`,
+	if decision.Delegations[0].SpecialistID != "vision" {
+		t.Fatalf("unexpected specialist: %#v", decision.Delegations[0])
+	}
+}
+
+func TestNormalUserRequestedJSONIsNotMistakenForCoordination(t *testing.T) {
+	for _, raw := range []string{
+		`{"status":"fixed","files":["main.go"]}`,
+		`{"kind":"report","assessment":"healthy"}`,
+		`{"assessment":"healthy","delegations":[]}`,
 	} {
-		if _, err := decodeJSONObject[RouterDecision](invalid); err == nil {
-			t.Fatalf("undeclared structured-output variant was accepted: %q", invalid)
+		if looksLikeCoordination(raw) {
+			t.Fatalf("ordinary answer was classified as orchestration: %s", raw)
 		}
 	}
 }
 
-func TestRouterPromptDeclaresTheExactWireFields(t *testing.T) {
-	t.Parallel()
-
-	system, _ := routerMessages(profile.Profile{}, "task", nil)
-	for _, field := range []string{`"lead_id"`, `"confidence"`, `"basis"`} {
-		if !strings.Contains(system, field) {
-			t.Errorf("router system prompt does not declare %s", field)
-		}
+func TestHandoffMustBeExclusive(t *testing.T) {
+	decision := AgentDecision{
+		Kind: "coordinate", Assessment: "The research peer should own this evidence audit.",
+		Handoff:     &ProposedHandoff{PeerID: "research", Reason: "Evidence is the deliverable."},
+		Delegations: []ProposedDelegation{{Key: "also-call", SpecialistID: "vision", Objective: "This makes the transition ambiguous."}},
+	}
+	if err := validateAgentDecision(decision, 0); err == nil {
+		t.Fatal("handoff plus parallel work was accepted")
 	}
 }
 
-func TestEnvelopedJSONRecoveryIsExactAndUnambiguous(t *testing.T) {
-	t.Parallel()
-
-	value, err := decodeEnvelopedJSONObject[RouterDecision](
-		"Here is the requested object:\n```json\n" +
-			`{"lead_id":"engineering","confidence":1,"basis":"Code is the deliverable."}` +
-			"\n```",
-	)
-	if err != nil {
-		t.Fatal(err)
+func TestIdleCoordinationWithoutExistingWorkIsRejected(t *testing.T) {
+	decision := AgentDecision{Kind: "coordinate", Assessment: "Wait."}
+	if err := validateAgentDecision(decision, 0); err == nil {
+		t.Fatal("empty coordination cycle was accepted")
 	}
-	if value.LeadID != "engineering" || value.Basis != "Code is the deliverable." {
-		t.Fatalf("recovered decision = %#v", value)
-	}
-
-	for _, invalid := range []string{
-		`{"lead_id":"a","confidence":1,"basis":"one"} {"lead_id":"b","confidence":1,"basis":"two"}`,
-		`prose without a JSON object`,
-		`prefix {"lead_id":"a","confidence":1,"basis":"unterminated"`,
-		`prefix {"lead_id":"a","confidence":1,"basis":"ok","invented":true} suffix`,
-	} {
-		if _, err := decodeEnvelopedJSONObject[RouterDecision](invalid); err == nil {
-			t.Fatalf("ambiguous or invalid envelope was accepted: %q", invalid)
-		}
+	if err := validateAgentDecision(decision, 1); err != nil {
+		t.Fatalf("waiting on existing work was rejected: %v", err)
 	}
 }

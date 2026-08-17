@@ -232,7 +232,9 @@ func credentialUnavailable(err error) bool {
 // gateway means registering its adapter here; consumers discover all metadata
 // through descriptors and contain no gateway-specific branches.
 func NewGatewayRegistry(dataDir string) (*provider.Registry, error) {
-	registry := provider.NewRegistry()
+	registry := provider.NewRegistryWithOptions(provider.RegistryOptions{
+		Metadata: provider.NewModelsDevSource(nil),
+	})
 	credentials := credential.NewStore(dataDir)
 	gateways := []provider.Gateway{
 		cline.NewFactory(credentials),

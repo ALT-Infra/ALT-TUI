@@ -671,7 +671,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.optimisticSteers = removeFirst(m.optimisticSteers, msg.prompt)
 		m.pendingSteers = removeFirst(m.pendingSteers, msg.prompt)
 		m.prependQueued(msg.prompt, msg.payload)
-		m.status = "Lead could not be steered; message queued for the next turn: " + msg.err.Error()
+		m.status = "Current leader could not be steered; message queued for the next turn: " + msg.err.Error()
 		m.touchTranscript(true)
 	case errorMsg:
 		m.starting = false
@@ -988,27 +988,32 @@ func (m *Model) applyEvent(item event.Event) {
 		} else {
 			current.prompts = append(current.prompts, data.Text)
 		}
-	case event.LeadTurnStarted:
-		data, _ := event.Decode[event.LeadTurnData](item)
+	case event.AgentTurnStarted:
+		data, _ := event.Decode[event.AgentTurnData](item)
 		for _, kind := range data.SignalKinds {
 			if kind == string(event.UserInstruction) {
 				m.pendingSteers = nil
 				break
 			}
 		}
-	case event.LeadSelected:
-		data, _ := event.Decode[event.LeadSelectedData](item)
-		current.timeline = append(current.timeline, activityDetail(
-			"Routed to "+data.LeadID,
-			data.Basis,
-		))
-	case event.LeadDecision:
-		data, _ := event.Decode[event.LeadDecisionData](item)
+	case event.LeadershipTransferred:
+		data, _ := event.Decode[event.LeadershipTransferredData](item)
+		label := "Entered through " + data.ToAgentID
+		if data.FromAgentID != "" {
+			label = "Leadership " + data.FromAgentID + " → " + data.ToAgentID
+		}
+		current.timeline = append(current.timeline, activityDetail(label, data.Reason))
+	case event.AgentDecision:
+		data, _ := event.Decode[event.AgentDecisionData](item)
 		current.timeline = append(current.timeline, activityDetail("Coordinating", data.Assessment))
 	case event.DelegationCreated:
 		data, _ := event.Decode[event.DelegationSpec](item)
 		current.queuedDelegations++
-		current.timeline = append(current.timeline, activityDetail("Delegated to "+data.MemberID, data.Objective))
+		current.timeline = append(current.timeline, activityDetail("Called specialist "+data.SpecialistID, data.Objective))
+	case event.PeerTurnCreated:
+		data, _ := event.Decode[event.PeerTurnSpec](item)
+		current.queuedDelegations++
+		current.timeline = append(current.timeline, activityDetail("Consulted peer "+data.PeerID, data.Objective))
 	case event.DelegationStarted:
 		data, _ := event.Decode[event.DelegationStartedData](item)
 		if current.queuedDelegations > 0 {
@@ -1032,8 +1037,25 @@ func (m *Model) applyEvent(item event.Event) {
 	case event.DelegationCancelled:
 		finishDelegation(current)
 		current.timeline = append(current.timeline, "Delegation cancelled")
+	case event.PeerTurnStarted:
+		data, _ := event.Decode[event.PeerTurnStartedData](item)
+		if current.queuedDelegations > 0 {
+			current.queuedDelegations--
+		}
+		current.activeDelegations++
+		current.timeline = append(current.timeline, item.Actor+" consulting (attempt "+strconv.Itoa(data.Attempt)+")")
+	case event.PeerTurnCompleted:
+		finishDelegation(current)
+		current.timeline = append(current.timeline, item.Actor+" returned consultation")
+	case event.PeerTurnFailed:
+		data, _ := event.Decode[event.PeerTurnFailedData](item)
+		finishDelegation(current)
+		current.timeline = append(current.timeline, activityDetail(item.Actor+" consultation failed", data.Error))
+	case event.PeerTurnCancelled:
+		finishDelegation(current)
+		current.timeline = append(current.timeline, "Peer consultation cancelled")
 	case event.FinalStarted:
-		current.timeline = append(current.timeline, "Lead synthesis started")
+		current.timeline = append(current.timeline, item.Actor+" answering")
 	case event.FinalTextDelta:
 		data, _ := event.Decode[event.TextDeltaData](item)
 		current.answer += data.Text

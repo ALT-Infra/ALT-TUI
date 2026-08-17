@@ -55,9 +55,9 @@ func (s *commandState) sessionContinueCommand() *cobra.Command {
 			defer unsubscribe()
 			for item := range events {
 				switch item.Kind {
-				case event.LeadSelected:
-					data, _ := event.Decode[event.LeadSelectedData](item)
-					fmt.Fprintf(s.errOut, "lead %s · %s\n", data.LeadID, data.Basis)
+				case event.LeadershipTransferred:
+					data, _ := event.Decode[event.LeadershipTransferredData](item)
+					fmt.Fprintf(s.errOut, "leader %s · %s\n", data.ToAgentID, data.Reason)
 				case event.FinalTextDelta:
 					data, _ := event.Decode[event.TextDeltaData](item)
 					fmt.Fprint(s.out, data.Text)
@@ -133,9 +133,9 @@ func (s *commandState) sessionShowCommand() *cobra.Command {
 				return err
 			}
 			fmt.Fprintf(s.out,
-				"Session:   %s\nLatest:    %s\nTitle:     %s\nStatus:    %s\nProfile:   %s@%d\nLead:      %s\nWorkspace: %s\nCreated:   %s\nTurns:     %d\n",
+				"Session:   %s\nLatest:    %s\nTitle:     %s\nStatus:    %s\nProfile:   %s@%d\nLeader:    %s\nWorkspace: %s\nCreated:   %s\nTurns:     %d\n",
 				item.ConversationID, item.ID, item.Title, item.Status, item.ProfileID,
-				item.ProfileRevision, valueOrDash(item.LeadID), item.Workspace,
+				item.ProfileRevision, valueOrDash(item.LeaderID), item.Workspace,
 				turns[0].CreatedAt.Local().Format(time.RFC3339), len(turns))
 			for index, turn := range turns {
 				fmt.Fprintf(s.out, "\nTurn %d:\n%s\n", index+1, turn.Task)
@@ -249,15 +249,15 @@ func (s *commandState) sessionCancelCommand() *cobra.Command {
 
 func eventSummary(item event.Event) string {
 	switch item.Kind {
-	case event.LeadSelected:
-		data, _ := event.Decode[event.LeadSelectedData](item)
-		return data.LeadID + " · " + data.Basis
-	case event.LeadDecision:
-		data, _ := event.Decode[event.LeadDecisionData](item)
+	case event.LeadershipTransferred:
+		data, _ := event.Decode[event.LeadershipTransferredData](item)
+		return data.ToAgentID + " · " + data.Reason
+	case event.AgentDecision:
+		data, _ := event.Decode[event.AgentDecisionData](item)
 		return data.Assessment
 	case event.DelegationCreated:
 		data, _ := event.Decode[event.DelegationSpec](item)
-		return data.MemberID + " · " + data.Objective
+		return data.SpecialistID + " · " + data.Objective
 	case event.ToolCalled:
 		data, _ := event.Decode[event.ToolCallData](item)
 		return data.Tool

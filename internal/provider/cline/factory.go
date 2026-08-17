@@ -1,7 +1,6 @@
 package cline
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -35,7 +34,6 @@ const (
 	// This is Cline's production device client as published by its open-source SDK.
 	DefaultWorkOSClientID = "client_01K3A541FN8TA3EPPHTD2325AR"
 	credentialEnvironment = "ALT_CLINE_API_KEY"
-	refreshBuffer         = 5 * time.Minute
 )
 
 type Factory struct {
@@ -65,7 +63,7 @@ func (*Factory) Descriptor() provider.GatewayDescriptor {
 		CredentialEnvironment: credentialEnvironment,
 		Authentication:        provider.AuthenticationDeviceOAuth,
 		MultiModelCatalog:     true,
-		Routes:                []provider.GatewayRoute{{ID: Route, Label: "ClinePass + Free"}},
+		Routes:                []provider.GatewayRoute{{ID: Route, Label: "ClinePass + Free", MetadataCatalog: "cline-pass"}},
 	}
 }
 
@@ -109,7 +107,7 @@ type workOSDeviceResponse struct {
 	VerificationURI         string `json:"verification_uri"`
 	VerificationURIComplete string `json:"verification_uri_complete"`
 	ExpiresIn               int    `json:"expires_in"`
-	Interval                int    `json:"interval"`
+	Interval                *int   `json:"interval"`
 	Error                   string `json:"error"`
 	ErrorDescription        string `json:"error_description"`
 }
@@ -141,10 +139,17 @@ func (f *Factory) BeginDeviceAuthorization(ctx context.Context) (provider.Device
 		return provider.DeviceAuthorization{}, errors.New("Cline returned an incomplete device authorization")
 	}
 	if payload.ExpiresIn <= 0 {
-		payload.ExpiresIn = 300
+		return provider.DeviceAuthorization{}, errors.New("Cline returned device authorization without the required positive expires_in")
 	}
-	if payload.Interval <= 0 {
-		payload.Interval = 5
+	// RFC 8628 owns this value: absent interval means five seconds. A
+	// provider-supplied non-positive interval is invalid rather than a reason
+	// for ALT to silently manufacture different timing.
+	interval := 5
+	if payload.Interval != nil {
+		if *payload.Interval <= 0 {
+			return provider.DeviceAuthorization{}, errors.New("Cline returned a non-positive device authorization interval")
+		}
+		interval = *payload.Interval
 	}
 	return provider.DeviceAuthorization{
 		VerificationURI:         payload.VerificationURI,
@@ -152,7 +157,7 @@ func (f *Factory) BeginDeviceAuthorization(ctx context.Context) (provider.Device
 		UserCode:                payload.UserCode,
 		DeviceCode:              payload.DeviceCode,
 		ExpiresInSeconds:        payload.ExpiresIn,
-		PollIntervalSeconds:     payload.Interval,
+		PollIntervalSeconds:     interval,
 	}, nil
 }
 
@@ -161,8 +166,18 @@ func (f *Factory) CompleteDeviceAuthorization(
 	authorization provider.DeviceAuthorization,
 	progress func(string),
 ) error {
+	if authorization.ExpiresInSeconds <= 0 || strings.TrimSpace(authorization.DeviceCode) == "" {
+		return errors.New("Cline device authorization is incomplete or expired")
+	}
 	deadline := time.Now().Add(time.Duration(authorization.ExpiresInSeconds) * time.Second)
-	interval := time.Duration(max(1, authorization.PollIntervalSeconds)) * time.Second
+	pollSeconds := authorization.PollIntervalSeconds
+	if pollSeconds == 0 {
+		pollSeconds = 5 // RFC 8628 default when the authorization server omitted interval.
+	}
+	if pollSeconds < 0 {
+		return errors.New("Cline device authorization has a negative poll interval")
+	}
+	interval := time.Duration(pollSeconds) * time.Second
 	endpoint := strings.TrimRight(f.WorkOSBaseURL, "/") + "/user_management/authenticate"
 	if err := validateEndpoint("Cline WorkOS", endpoint, "api.workos.com"); err != nil {
 		return err
@@ -197,7 +212,9 @@ func (f *Factory) CompleteDeviceAuthorization(
 				progress("waiting for browser confirmation")
 			}
 		case "slow_down":
-			interval += time.Second
+			// RFC 8628 section 3.5 requires increasing the interval by five
+			// seconds for this and every subsequent request.
+			interval += 5 * time.Second
 		case "access_denied", "expired_token", "invalid_grant":
 			return fmt.Errorf("Cline authorization failed: %s", firstNonEmpty(tokens.ErrorDescription, tokens.Error))
 		default:
@@ -258,7 +275,12 @@ func (f *Factory) resolveAccessToken(ctx context.Context) (string, error) {
 	if parseErr != nil {
 		return "", fmt.Errorf("read Cline credential expiry: %w", parseErr)
 	}
-	if time.Until(expiresAt) > refreshBuffer {
+	remaining := time.Until(expiresAt)
+	requiredValidity := time.Duration(0)
+	if deadline, ok := ctx.Deadline(); ok {
+		requiredValidity = max(time.Until(deadline), 0)
+	}
+	if remaining > requiredValidity {
 		return addWorkOSPrefix(stored.AccessToken), nil
 	}
 	if stored.RefreshToken == "" {
@@ -305,13 +327,17 @@ func (f *Factory) NewChatModel(ctx context.Context, spec profile.Model, mode pro
 		APIKey:     key,
 		BaseURL:    baseURL,
 		Model:      spec.Name,
-		HTTPClient: &client,
+		HTTPClient: provider.CacheAwareHTTPClient(&client),
 	}
 	_ = mode
 	if spec.ReasoningEffort != "" {
 		config.ExtraFields = map[string]any{"reasoning_effort": spec.ReasoningEffort}
 	}
-	return einoopenai.NewChatModel(ctx, config)
+	chat, err := einoopenai.NewChatModel(ctx, config)
+	if err != nil {
+		return nil, err
+	}
+	return provider.ObserveCacheUsage(chat), nil
 }
 
 type headerTransport struct {
@@ -338,25 +364,10 @@ func (transport *headerTransport) RoundTrip(request *http.Request) (*http.Respon
 	if err != nil {
 		return nil, err
 	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 ||
-		!strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "application/json") {
-		return response, nil
-	}
-	body, err := io.ReadAll(response.Body)
-	response.Body.Close()
-	if err != nil {
-		return nil, fmt.Errorf("read Cline response: %w", err)
-	}
-	var envelope struct {
-		Success bool            `json:"success"`
-		Data    json.RawMessage `json:"data"`
-	}
-	if json.Unmarshal(body, &envelope) == nil && envelope.Success && len(envelope.Data) > 0 {
-		body = envelope.Data
-	}
-	response.Body = io.NopCloser(bytes.NewReader(body))
-	response.ContentLength = int64(len(body))
-	response.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	// Cline's language endpoint is already OpenAI-compatible. Its current SDK
+	// unwraps success/data only for the distinct OpenRouter image-generation
+	// operation, which ALT does not route through this text model. Preserve
+	// language response bytes and streaming behavior exactly.
 	return response, nil
 }
 

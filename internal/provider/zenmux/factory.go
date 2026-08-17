@@ -31,12 +31,13 @@ func NewFactory(credentials credential.Store) *Factory {
 				CredentialEnvironment: "ALT_ZENMUX_API_KEY",
 				MultiModelCatalog:     true,
 				Routes: []provider.GatewayRoute{
-					{ID: Route, Label: "OpenAI-compatible"},
+					{ID: Route, Label: "OpenAI-compatible", MetadataCatalog: "zenmux"},
 				},
 			},
-			Route:    Route,
-			BaseURL:  DefaultEndpoint,
-			Hostname: "zenmux.ai",
+			Route:                        Route,
+			BaseURL:                      DefaultEndpoint,
+			Hostname:                     "zenmux.ai",
+			ExplicitCacheControlPrefixes: []string{"anthropic/", "qwen/"},
 		},
 	)}
 }
@@ -45,6 +46,8 @@ type modelsResponse struct {
 	Data []struct {
 		ID               string   `json:"id"`
 		DisplayName      string   `json:"display_name"`
+		ContextLength    int      `json:"context_length"`
+		InputModalities  []string `json:"input_modalities"`
 		OutputModalities []string `json:"output_modalities"`
 	} `json:"data"`
 }
@@ -70,6 +73,10 @@ func (f *Factory) ListModels(ctx context.Context) ([]provider.CatalogModel, erro
 			Capabilities: provider.Capabilities{
 				StructuredOutput: provider.CapabilityUnknown,
 				ToolCalling:      provider.CapabilityUnknown,
+				ImageInput:       modalityCapability(item.InputModalities, "image"),
+			},
+			Limits: provider.ModelLimits{
+				ContextWindow: provider.NewTokenLimit(item.ContextLength, provider.LimitSourceGatewayCatalog),
 			},
 		})
 	}
@@ -78,6 +85,16 @@ func (f *Factory) ListModels(ctx context.Context) ([]provider.CatalogModel, erro
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result, nil
+}
+
+func modalityCapability(values []string, expected string) provider.CapabilityState {
+	if len(values) == 0 {
+		return provider.CapabilityUnknown
+	}
+	if contains(values, expected) {
+		return provider.CapabilitySupported
+	}
+	return provider.CapabilityUnsupported
 }
 
 func contains(values []string, expected string) bool {

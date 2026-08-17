@@ -31,7 +31,7 @@ func NewFactory(credentials credential.Store) *Factory {
 				CredentialEnvironment: "ALT_TOGETHER_API_KEY",
 				MultiModelCatalog:     true,
 				Routes: []provider.GatewayRoute{
-					{ID: Route, Label: "Serverless"},
+					{ID: Route, Label: "Serverless", MetadataCatalog: "togetherai"},
 				},
 			},
 			Route:    Route,
@@ -42,9 +42,10 @@ func NewFactory(credentials credential.Store) *Factory {
 }
 
 type catalogModel struct {
-	ID          string `json:"id"`
-	Type        string `json:"type"`
-	DisplayName string `json:"display_name"`
+	ID            string `json:"id"`
+	Type          string `json:"type"`
+	DisplayName   string `json:"display_name"`
+	ContextLength int    `json:"context_length"`
 }
 
 func (f *Factory) ListModels(ctx context.Context) ([]provider.CatalogModel, error) {
@@ -68,6 +69,9 @@ func (f *Factory) ListModels(ctx context.Context) ([]provider.CatalogModel, erro
 			Capabilities: provider.Capabilities{
 				StructuredOutput: provider.CapabilityUnknown,
 				ToolCalling:      provider.CapabilityUnknown,
+			},
+			Limits: provider.ModelLimits{
+				ContextWindow: provider.NewTokenLimit(item.ContextLength, provider.LimitSourceGatewayCatalog),
 			},
 		})
 	}

@@ -122,7 +122,7 @@ func TestLargeToolResultIsPreservedOutsideModelContext(t *testing.T) {
 		root: workspace, archive: runtime.archive, delegate: local,
 		allowArchiveWrite: true, archiveOwner: "test", archiveOutput: runtime.options.ArchiveToolOutput,
 	}
-	reducer, err := runtime.toolResultReductionHandler(context.Background(), "test", backend)
+	reducer, err := runtime.toolResultReductionHandler(context.Background(), "test", backend, constrainedTestBudget(60_000))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +195,7 @@ func TestLargeToolResultArchiveSurvivesRuntimeClose(t *testing.T) {
 		root: workspace, archive: runtime.archive, delegate: local,
 		allowArchiveWrite: true, archiveOwner: "test", archiveOutput: runtime.options.ArchiveToolOutput,
 	}
-	reducer, err := runtime.toolResultReductionHandler(context.Background(), "test", backend)
+	reducer, err := runtime.toolResultReductionHandler(context.Background(), "test", backend, constrainedTestBudget(60_000))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +251,7 @@ func TestHistoricalToolRoundIsClearedOnlyAfterExactDurableOffload(t *testing.T) 
 		t.Fatal(err)
 	}
 	backend := &rootedBackend{root: workspace, archive: runtime.archive, delegate: local, allowArchiveWrite: true}
-	reducer, err := runtime.toolResultReductionHandler(context.Background(), "test", backend)
+	reducer, err := runtime.toolResultReductionHandler(context.Background(), "test", backend, constrainedTestBudget(60_000))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +287,7 @@ func TestHistoricalToolRoundIsClearedOnlyAfterExactDurableOffload(t *testing.T) 
 	}
 }
 
-func TestRuntimeHandlersExposeCompleteCatalogueThroughToolSearch(t *testing.T) {
+func TestRuntimeHandlersExposeStableCompleteCatalogueDirectly(t *testing.T) {
 	runtime, err := NewRuntime(context.Background(), t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -304,8 +304,8 @@ func TestRuntimeHandlersExposeCompleteCatalogueThroughToolSearch(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if len(runContext.Tools) != len(ToolNames())+1 {
-		t.Fatalf("agent tool count = %d, want %d runtime tools plus tool_search", len(runContext.Tools), len(ToolNames()))
+	if len(runContext.Tools) != len(ToolNames()) {
+		t.Fatalf("agent tool count = %d, want %d directly available runtime tools", len(runContext.Tools), len(ToolNames()))
 	}
 	names := make(map[string]bool, len(runContext.Tools))
 	for _, runtimeTool := range runContext.Tools {
@@ -320,8 +320,8 @@ func TestRuntimeHandlersExposeCompleteCatalogueThroughToolSearch(t *testing.T) {
 			t.Fatalf("complete runtime catalogue is missing %q: %#v", name, names)
 		}
 	}
-	if !names["tool_search"] {
-		t.Fatalf("dynamic discovery tool is absent: %#v", names)
+	if names["tool_search"] {
+		t.Fatalf("small stable catalogue unexpectedly contains dynamic discovery: %#v", names)
 	}
 
 	infos := make([]*schema.ToolInfo, 0, len(runContext.Tools))
@@ -332,13 +332,8 @@ func TestRuntimeHandlersExposeCompleteCatalogueThroughToolSearch(t *testing.T) {
 		}
 		infos = append(infos, info)
 	}
-	state := &adk.ChatModelAgentState{Messages: []*schema.Message{schema.UserMessage("inspect the workspace")}, ToolInfos: infos}
-	_, state, err = handlers[1].BeforeModelRewriteState(context.Background(), state, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(state.ToolInfos) != 1 || state.ToolInfos[0].Name != "tool_search" {
-		t.Fatalf("initial model-visible tools = %#v, want only tool_search", state.ToolInfos)
+	if len(infos) != len(ToolNames()) {
+		t.Fatalf("initial model-visible tool schemas = %d, want stable catalogue of %d", len(infos), len(ToolNames()))
 	}
 }
 

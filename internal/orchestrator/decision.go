@@ -1,19 +1,23 @@
 package orchestrator
 
-type RouterDecision struct {
-	LeadID     string  `json:"lead_id"`
-	Confidence float64 `json:"confidence"`
-	Basis      string  `json:"basis"`
-}
-
-type LeadDecision struct {
+type AgentDecision struct {
+	Kind         string               `json:"kind"`
 	Assessment   string               `json:"assessment"`
 	Delegations  []ProposedDelegation `json:"delegations"`
 	PeerTurns    []ProposedPeerTurn   `json:"peer_turns"`
 	Cancel       []string             `json:"cancel"`
-	Finalize     bool                 `json:"finalize"`
-	FinalBrief   string               `json:"final_brief"`
+	Handoff      *ProposedHandoff     `json:"handoff,omitempty"`
 	observedWork int
+}
+
+type AgentOutcome struct {
+	Decision *AgentDecision
+	Answer   string
+}
+
+type ProposedHandoff struct {
+	PeerID string `json:"peer_id"`
+	Reason string `json:"reason"`
 }
 
 type ProposedPeerTurn struct {
@@ -26,15 +30,15 @@ type ProposedPeerTurn struct {
 }
 
 type ProposedDelegation struct {
-	Key         string   `json:"key"`
-	MemberID    string   `json:"member_id"`
-	Objective   string   `json:"objective"`
-	Context     string   `json:"context"`
-	Attachments []string `json:"attachments"`
-	DependsOn   []string `json:"depends_on"`
+	Key          string   `json:"key"`
+	SpecialistID string   `json:"specialist_id"`
+	Objective    string   `json:"objective"`
+	Context      string   `json:"context"`
+	Attachments  []string `json:"attachments"`
+	DependsOn    []string `json:"depends_on"`
 }
 
-type MemberResult struct {
+type SpecialistResult struct {
 	Result     string   `json:"result"`
 	Findings   []string `json:"findings"`
 	Risks      []string `json:"risks"`

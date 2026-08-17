@@ -1,293 +1,218 @@
 package orchestrator
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"altv1/internal/content"
 	"altv1/internal/event"
 	"altv1/internal/profile"
-	builtinprofiles "altv1/profiles"
 )
 
-func TestConversationHistoryReachesRouterLeadAndFinalPrompts(t *testing.T) {
-	document, err := profile.Parse(builtinprofiles.Engineering)
-	if err != nil {
-		t.Fatal(err)
-	}
-	history := []ConversationTurn{{
-		Task:   "Design the persistence boundary.",
-		Answer: "Use SQLite WAL with ordered events.",
-		Status: "completed",
-		LeadID: "engineering-lead",
-		ObservableTrace: []ConversationTrace{{
-			Sequence: 7, Kind: event.DelegationCompleted, Actor: "research-lead",
-			CorrelationID: "delegation-7",
-			Data:          json.RawMessage(`{"result":"WAL recovery was directly observed."}`),
-		}},
-	}}
-	_, router := routerMessages(document.Profile, "Now test its recovery behavior.", history)
-	state := &Projection{
-		Task:                "Now test its recovery behavior.",
-		ConversationHistory: history,
-		Delegations:         make(map[string]*Delegation),
-	}
-	lead := document.Profile.Leads[0]
-	_, leadPrompt := leadMessages(document.Profile, lead, state, nil)
-	_, finalPrompt := finalMessages(document.Profile, lead, state, "Answer the follow-up.")
-
-	for name, prompt := range map[string]string{
-		"router": router,
-		"lead":   leadPrompt,
-		"final":  finalPrompt,
-	} {
-		for _, expected := range []string{
-			"Design the persistence boundary.",
-			"Use SQLite WAL with ordered events.",
-			"Now test its recovery behavior.",
-			"delegation.completed",
-			"WAL recovery was directly observed.",
-		} {
-			if !strings.Contains(prompt, expected) {
-				t.Fatalf("%s prompt is missing conversation context %q:\n%s", name, expected, prompt)
-			}
-		}
-	}
-}
-
-func TestFinalSynthesisReceivesCurrentLeadToolEvidenceWithoutRediscovery(t *testing.T) {
-	document, err := profile.Parse(builtinprofiles.Engineering)
-	if err != nil {
-		t.Fatal(err)
-	}
-	state := &Projection{
-		Task:        "Check one immutable reference.",
-		Delegations: make(map[string]*Delegation), PeerTurns: make(map[string]*PeerTurn),
-		ObservableTrace: []ConversationTrace{
-			{Reference: "alt://context/records/00000000-0000-7000-8000-000000000011", Sequence: 11, Kind: event.ToolCalled, Actor: "engineering-lead", Data: json.RawMessage(`{"tool":"context_open","arguments":"known-reference"}`)},
-			{Reference: "alt://context/records/00000000-0000-7000-8000-000000000012", Sequence: 12, Kind: event.ToolCompleted, Actor: "engineering-lead", Data: json.RawMessage(`{"tool":"context_open","failed":true,"error":"context record not found"}`)},
-		},
-	}
-	system, user := finalMessages(document.Profile, document.Profile.Leads[0], state, "Report the observed access result.")
-	for _, expected := range []string{
-		"completed immutable call", "current_tool_evidence",
-		"context_open", "context record not found",
-		"alt://context/records/00000000-0000-7000-8000-000000000012",
-	} {
-		if !strings.Contains(system+user, expected) {
-			t.Fatalf("final synthesis omitted delivered tool evidence %q:\n%s\n%s", expected, system, user)
-		}
-	}
-	leadSystem, leadUser := leadMessages(document.Profile, document.Profile.Leads[0], state, nil)
-	for _, expected := range []string{"completed immutable call", "current_tool_evidence", "context record not found"} {
-		if !strings.Contains(leadSystem+leadUser, expected) {
-			t.Fatalf("next Lead turn omitted delivered tool evidence %q:\n%s\n%s", expected, leadSystem, leadUser)
-		}
-	}
-}
-
-func TestLeadWorkingViewIsBoundedAndKeepsExactRecallPaths(t *testing.T) {
-	document, err := profile.Parse(builtinprofiles.Engineering)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lead := document.Profile.Leads[0]
-	state := &Projection{
-		Task:          "Preserve the whole request while bounding old evidence.",
-		TaskReference: "alt://context/records/00000000-0000-7000-8000-000000000001",
-		Delegations:   make(map[string]*Delegation), PeerTurns: make(map[string]*PeerTurn),
-	}
-	for index := 0; index < 200; index++ {
-		id := fmt.Sprintf("%04d", index)
-		marker := fmt.Sprintf("exact-result-marker-%04d", index)
-		state.Delegations[id] = &Delegation{
-			Spec:   event.DelegationSpec{ID: id, MemberID: "research", Objective: "Investigate " + marker},
-			Status: DelegationCompleted, Result: marker,
-			SpecSequence: int64(index*2 + 1), ResultSequence: int64(index*2 + 2),
-			SpecReference:   fmt.Sprintf("alt://context/records/00000000-0000-7000-8001-%012d", index*2+1),
-			ResultReference: fmt.Sprintf("alt://context/records/00000000-0000-7000-8001-%012d", index*2+2),
-		}
-	}
-	_, prompt := leadMessages(document.Profile, lead, state, nil)
-	if strings.Contains(prompt, "exact-result-marker-0000") {
-		t.Fatal("old exact evidence leaked back into the bounded working view")
-	}
-	if !strings.Contains(prompt, "exact-result-marker-0199") ||
-		!strings.Contains(prompt, `"omitted_entries": 188`) ||
-		!strings.Contains(prompt, "context_search") || !strings.Contains(prompt, "context_open") {
-		t.Fatalf("working view omitted its recent evidence or recall contract:\n%s", prompt)
-	}
-	if len(prompt) > 35_000 {
-		t.Fatalf("working view grew with archived evidence: %d bytes", len(prompt))
-	}
-	_, repeated := leadMessages(document.Profile, lead, state, nil)
-	if prompt != repeated {
-		t.Fatal("the same durable state produced a non-deterministic working view")
-	}
-}
-
-func TestLargeRecentEvidenceUsesUTF8SafePreviewAndExactReference(t *testing.T) {
-	document, err := profile.Parse(builtinprofiles.Engineering)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lead := document.Profile.Leads[0]
-	reference := "alt://context/records/00000000-0000-7000-8000-000000000099"
-	state := &Projection{Task: "Read the result", Delegations: map[string]*Delegation{
-		"d": {
-			Spec:   event.DelegationSpec{ID: "d", MemberID: "research", Objective: "Inspect Unicode evidence"},
-			Status: DelegationCompleted, Result: strings.Repeat("عِلْم🧭", 5_000),
-			ResultReference: reference,
-		},
-	}, PeerTurns: make(map[string]*PeerTurn)}
-	_, prompt := leadMessages(document.Profile, lead, state, nil)
-	if !strings.Contains(prompt, reference) || !strings.Contains(prompt, `"compacted": true`) || !json.Valid([]byte(strings.TrimPrefix(prompt, "CURRENT SESSION STATE:\n"))) {
-		t.Fatalf("large evidence did not retain a valid bounded exact reference:\n%s", prompt)
-	}
-}
-
-func TestSteeringHistoryIsBoundedAndEveryVisibleInstructionKeepsItsExactReference(t *testing.T) {
-	document, err := profile.Parse(builtinprofiles.Engineering)
-	if err != nil {
-		t.Fatal(err)
-	}
-	state := &Projection{
-		Task: "Long-running work", Delegations: make(map[string]*Delegation), PeerTurns: make(map[string]*PeerTurn),
-	}
-	for index := 0; index < 100; index++ {
-		state.UserInstructions = append(state.UserInstructions, fmt.Sprintf("instruction-%03d", index))
-		state.UserInstructionReferences = append(state.UserInstructionReferences,
-			fmt.Sprintf("alt://context/records/00000000-0000-7000-8002-%012d", index))
-	}
-	_, prompt := leadMessages(document.Profile, document.Profile.Leads[0], state, nil)
-	if strings.Contains(prompt, "instruction-000") || !strings.Contains(prompt, "instruction-099") ||
-		!strings.Contains(prompt, `"archived_occurrences": 88`) ||
-		!strings.Contains(prompt, "00000000-0000-7000-8002-000000000099") {
-		t.Fatalf("instruction view was not bounded and referenced:\n%s", prompt)
-	}
-}
-
-func TestProjectionBoundsToolTraceMemoryWhileCanonicalEventsRemainExternal(t *testing.T) {
-	state := &Projection{SessionID: "session", Delegations: make(map[string]*Delegation), PeerTurns: make(map[string]*PeerTurn)}
-	for sequence := int64(1); sequence <= 100; sequence++ {
-		item, err := (event.Draft{
-			Kind: event.ToolCompleted, Actor: "engineering",
-			Data: event.ToolCompletedData{ToolCallID: fmt.Sprintf("call-%d", sequence), Tool: "context_open", Result: "exact result"},
-		}).Materialize("session", sequence, time.Unix(sequence, 0))
+func TestProjectionPreservesCompleteEvidenceUntilTheModelBudgetLayer(t *testing.T) {
+	state := &Projection{SessionID: "long-running-turn", Delegations: map[string]*Delegation{}, PeerTurns: map[string]*PeerTurn{}}
+	const occurrences = 137
+	for sequence := 1; sequence <= occurrences; sequence++ {
+		instruction, err := (event.Draft{
+			Kind: event.UserInstruction, Actor: "user",
+			Data: event.UserInstructionData{Text: fmt.Sprintf("instruction-%03d", sequence)},
+		}).Materialize(state.SessionID, int64(sequence), time.Unix(int64(sequence), 0))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := state.Apply(item); err != nil {
+		if err := state.Apply(instruction); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if len(state.ObservableTrace) != projectionTraceLimit || state.ObservableTraceArchived != 100-projectionTraceLimit {
-		t.Fatalf("bounded trace = %d recent + %d archived", len(state.ObservableTrace), state.ObservableTraceArchived)
+	if len(state.UserInstructions) != occurrences || state.UserInstructionsArchived != 0 {
+		t.Fatalf("projection erased evidence before model budgeting: visible=%d archived=%d",
+			len(state.UserInstructions), state.UserInstructionsArchived)
 	}
-	if state.ObservableTrace[0].Sequence != int64(100-projectionTraceLimit+1) {
-		t.Fatalf("oldest retained trace sequence = %d", state.ObservableTrace[0].Sequence)
-	}
-}
-
-func TestCalledMemberReceivesOnlyDefinitionObjectiveContextAndToolDiscoveryPolicy(t *testing.T) {
-	document, err := profile.Parse(builtinprofiles.Engineering)
-	if err != nil {
-		t.Fatal(err)
-	}
-	p := document.Profile
-	lead := p.Leads[0]
-	member := p.CallableMembersFor(lead)[0]
-	delegation := &Delegation{Spec: event.DelegationSpec{
-		ID: "d2", MemberID: member.ID,
-		Objective: "Check the bounded endpoint behavior.",
-		Context:   "The Lead explicitly curated this evidence.",
-		DependsOn: []string{"secret-dependency-id"},
-	}}
-	system, user := memberMessages(p, member, delegation)
-
-	if !strings.Contains(system, member.Definition) ||
-		!strings.Contains(system, "tool_search") {
-		t.Fatal("stable definition or dynamic tool-discovery policy is absent")
-	}
-	var payload map[string]any
-	if err := json.Unmarshal([]byte(user), &payload); err != nil {
-		t.Fatalf("called-member payload is not JSON: %v\n%s", err, user)
-	}
-	if len(payload) != 2 ||
-		payload["objective"] != delegation.Spec.Objective ||
-		payload["context"] != delegation.Spec.Context {
-		t.Fatalf("called-member payload crossed its context boundary: %#v", payload)
-	}
-	for _, forbidden := range []string{
-		"user_task", "conversation_history", "dependency_results",
-		"selected_lead", "secret-dependency-id",
-	} {
-		if strings.Contains(user, forbidden) {
-			t.Fatalf("called-member prompt leaked %q:\n%s", forbidden, user)
-		}
+	_, view := activeAgentMessages(visionAssistedCodingTeam(), visionAssistedCodingTeam().Primary, state, nil, false)
+	if !strings.Contains(view, "instruction-001") || !strings.Contains(view, "instruction-137") {
+		t.Fatal("structured projection applied a count-based recent-tail policy before gateway budgeting")
 	}
 }
 
-func TestCurrentPromptsDescribeWorkWithoutAssigningPersonas(t *testing.T) {
-	document, err := profile.Parse(builtinprofiles.Engineering)
-	if err != nil {
-		t.Fatal(err)
-	}
-	p := document.Profile
-	lead := p.Leads[0]
-	member := p.CallableMembersFor(lead)[0]
+func TestPrimaryPromptHasConversationAndMovableLeadershipContract(t *testing.T) {
+	p := visionAssistedCodingTeam()
 	state := &Projection{
-		Task:        "Compare the current framework support before implementing.",
-		Delegations: make(map[string]*Delegation),
+		Task:          "Fix the compiler error shown in the screenshot.",
+		TaskInput:     content.Text("Fix the compiler error shown in the screenshot."),
+		TaskReference: "alt://context/records/current",
+		LeaderID:      p.Primary.ID,
+		ConversationHistory: []ConversationTurn{{
+			SessionID: "earlier", Task: "Create the parser.", Answer: "Implemented the parser.",
+			Status: "completed", LeaderID: p.Primary.ID,
+		}},
+		Delegations: map[string]*Delegation{}, PeerTurns: map[string]*PeerTurn{},
 	}
-	delegation := &Delegation{Spec: event.DelegationSpec{
-		ID: "d1", MemberID: member.ID,
-		Objective: "Establish whether the framework supports this requirement.",
-	}}
-
-	routerSystem, _ := routerMessages(p, state.Task, nil)
-	leadSystem, _ := leadMessages(p, lead, state, nil)
-	memberSystem, _ := memberMessages(p, member, delegation)
-	finalSystem, _ := finalMessages(p, lead, state, "Answer from the available evidence.")
-
-	for name, prompt := range map[string]string{
-		"router": routerSystem, "lead": leadSystem,
-		"member": memberSystem, "final": finalSystem,
+	system, view := activeAgentMessages(p, p.Primary, state, nil, true)
+	for _, expected := range []string{
+		"Exactly one agent may lead", "handoff_leadership", "next user turn", p.Primary.Definition,
 	} {
-		lower := strings.ToLower(prompt)
-		for _, forbidden := range []string{"you are", "act as", "\npersona:"} {
-			if strings.Contains(lower, forbidden) {
-				t.Fatalf("%s prompt contains persona framing %q:\n%s", name, forbidden, prompt)
-			}
+		if !strings.Contains(system, expected) {
+			t.Fatalf("active-agent contract is missing %q:\n%s", expected, system)
 		}
 	}
-	if !strings.Contains(leadSystem, lead.Definition) {
-		t.Fatal("Lead definition is not passed through verbatim")
+	if strings.Contains(system, `"kind": "coordinate"`) {
+		t.Fatal("tool-capable base prompt duplicates the tool-call schema as fallback JSON")
 	}
-	if !strings.Contains(memberSystem, member.Definition) {
-		t.Fatal("member definition is not passed through verbatim")
+	for _, expected := range []string{
+		`"primary":"deepseek-coder"`, `"id":"research-peer"`,
+		`"id":"vision-specialist"`,
+	} {
+		if !strings.Contains(system, expected) {
+			t.Fatalf("stable Team prompt is missing %q:\n%s", expected, system)
+		}
+	}
+	for _, expected := range []string{"Create the parser.", "Implemented the parser."} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("working view is missing %q:\n%s", expected, view)
+		}
+	}
+	for _, repeated := range []string{"authorized_peers", "authorized_specialists", "inherited_runtime_tools"} {
+		if strings.Contains(view, repeated) {
+			t.Fatalf("runtime snapshot repeats stable field %q: %s", repeated, view)
+		}
 	}
 }
 
-func TestRouterContractClassifiesTheDeliverableRatherThanQuestionGrammar(t *testing.T) {
-	document, err := profile.Parse(builtinprofiles.Engineering)
-	if err != nil {
-		t.Fatal(err)
-	}
-	system, _ := routerMessages(
-		document.Profile,
-		"How does one write a Hello World program in Brainfuck?",
-		nil,
-	)
-	for _, required := range []string{
-		"work and deliverable needed",
-		"not by whether its sentence is phrased as a question",
-		"wording used to request some other",
+func TestUnsupportedToolCallingFallbackCarriesCompleteCoordinationContract(t *testing.T) {
+	for _, expected := range []string{
+		`"kind": "coordinate"`, `"specialist_id"`, `"peer_id"`,
+		`"attachments"`, `"depends_on"`, `"handoff"`,
 	} {
-		if !strings.Contains(system, required) {
-			t.Fatalf("Router contract is missing %q:\n%s", required, system)
+		if !strings.Contains(coordinationFallbackInstruction, expected) {
+			t.Fatalf("coordination fallback is missing %q", expected)
 		}
+	}
+}
+
+func TestHandoffRecipientGetsTheSameExactUserInputAPI(t *testing.T) {
+	p := visionAssistedCodingTeam()
+	state := &Projection{
+		Task: "exact user words", TaskInput: content.Text("exact user words"),
+		LeaderID: "research-peer", Delegations: map[string]*Delegation{}, PeerTurns: map[string]*PeerTurn{},
+	}
+	system, _ := activeAgentMessages(p, p.Peers[0], state, nil, true)
+	if !strings.Contains(system, "durable, context-bearing ALT Team agent") ||
+		!strings.Contains(system, "When you hold leadership") {
+		t.Fatal("handoff recipient did not receive the shared leadership-capable agent contract")
+	}
+	if !strings.Contains(system, p.Peers[0].Definition) {
+		t.Fatal("handoff recipient lost its user-authored role")
+	}
+}
+
+func TestSpecialistPromptIsThoroughlyStatelessAndCallerComplete(t *testing.T) {
+	p := visionAssistedCodingTeam()
+	specialist := p.Specialists[0]
+	delegation := &Delegation{Spec: event.DelegationSpec{
+		ID: "vision-call-1", CallerID: p.Primary.ID, SpecialistID: specialist.ID,
+		Objective: "Transcribe the exact compiler diagnostic visible in image-1.",
+		Context:   "The caller needs filenames, line numbers, and the complete error text.",
+	}}
+	system, user := specialistMessages(p, specialist, delegation)
+	for _, expected := range []string{"thoroughly stateless", "conversation history", "cannot consult", specialist.Definition} {
+		if !strings.Contains(system, expected) {
+			t.Fatalf("specialist contract is missing %q:\n%s", expected, system)
+		}
+	}
+	for _, expected := range []string{delegation.Spec.Objective, delegation.Spec.Context} {
+		if !strings.Contains(user, expected) {
+			t.Fatalf("caller-authored specialist prompt is missing %q: %s", expected, user)
+		}
+	}
+	for _, forbidden := range []string{"conversation_history", "team_evidence", "prior_rounds", "current_user_task"} {
+		if strings.Contains(user, forbidden) {
+			t.Fatalf("specialist received implicit state field %q: %s", forbidden, user)
+		}
+	}
+}
+
+func TestRepeatedSpecialistCallsDoNotAccumulatePromptMemory(t *testing.T) {
+	p := visionAssistedCodingTeam()
+	specialist := p.Specialists[0]
+	first := &Delegation{Spec: event.DelegationSpec{ID: "first", SpecialistID: specialist.ID, Objective: "Read image-1."}}
+	second := &Delegation{Spec: event.DelegationSpec{ID: "second", SpecialistID: specialist.ID, Objective: "Read image-1."}}
+	firstSystem, firstUser := specialistMessages(p, specialist, first)
+	secondSystem, secondUser := specialistMessages(p, specialist, second)
+	if firstSystem != secondSystem || firstUser != secondUser {
+		t.Fatal("specialist prompt depends on invocation identity or prior invocation")
+	}
+}
+
+func TestPeerConsultationReceivesBroadDurableStateButNotLeadership(t *testing.T) {
+	p := visionAssistedCodingTeam()
+	state := &Projection{
+		Task:          "Decide whether the parser design needs external evidence.",
+		TaskReference: "alt://context/records/task", LeaderID: p.Primary.ID,
+		ConversationHistory: []ConversationTurn{{Task: "Implement parsing", Answer: "Parser added", Status: "completed"}},
+		Delegations: map[string]*Delegation{
+			"visual": {Spec: event.DelegationSpec{ID: "visual", SpecialistID: "vision-specialist", Objective: "Read the diagnostic"}, Status: DelegationCompleted, Result: "undefined symbol at parser.go:42"},
+		},
+		PeerTurns: map[string]*PeerTurn{},
+	}
+	turn := &PeerTurn{Spec: event.PeerTurnSpec{
+		ID: "peer-1", CallerID: p.Primary.ID, PeerID: p.Peers[0].ID,
+		CollaborationID: "research-thread", Round: 1,
+		Objective: "Assess whether the proposed fix matches the language specification.",
+	}}
+	system, user := peerMessages(p, p.Peers[0], turn, nil, state, true)
+	if !strings.Contains(system, "peer consultation") || !strings.Contains(user, `"holds_leadership":false`) {
+		t.Fatal("consulted peer was allowed to behave as leader")
+	}
+	if !strings.Contains(system, `{"result":"concise but complete contribution"`) || strings.Contains(user, "response_contract") {
+		t.Fatal("peer response contract was not kept once in the stable prompt")
+	}
+	for _, expected := range []string{"Implement parsing", "Parser added", "undefined symbol", turn.Spec.Objective} {
+		if !strings.Contains(user, expected) {
+			t.Fatalf("peer durable view is missing %q:\n%s", expected, user)
+		}
+	}
+}
+
+func TestRepeatedAgentSnapshotOmitsAlreadyDeliveredConversationHistory(t *testing.T) {
+	p := visionAssistedCodingTeam()
+	state := &Projection{
+		Task: "current task", TaskInput: content.Text("current task"), LeaderID: p.Primary.ID,
+		ConversationHistory: []ConversationTurn{{Task: "earlier task", Answer: "earlier answer"}},
+		UserInstructions:    []string{"new steering instruction"},
+		Delegations:         map[string]*Delegation{}, PeerTurns: map[string]*PeerTurn{},
+	}
+	_, view := activeAgentMessages(p, p.Primary, state, nil, false)
+	if strings.Contains(view, "conversation_history") || strings.Contains(view, "earlier answer") {
+		t.Fatalf("same-turn snapshot repeated already delivered conversation history: %s", view)
+	}
+	if !strings.Contains(view, "new steering instruction") {
+		t.Fatalf("same-turn snapshot dropped steerable user instructions: %s", view)
+	}
+}
+
+func visionAssistedCodingTeam() profile.Profile {
+	return profile.Profile{
+		Schema: profile.CurrentSchema, ID: "vision-assisted-coding", Revision: 1,
+		Name: "Vision-assisted coding", Gateway: "opencode",
+		Models: map[string]profile.Model{
+			"deepseek": {Route: "zen", Name: "deepseek-code"},
+			"research": {Route: "zen", Name: "research-model"},
+			"vision":   {Route: "zen", Name: "vision-model"},
+		},
+		Primary: profile.AgentAssignment{
+			ID: "deepseek-coder", Model: "deepseek",
+			Definition: "Own implementation end-to-end. Because this model is text-only, call the vision specialist whenever pixels carry required evidence.",
+			Peers:      []string{"research-peer"}, Specialists: []string{"vision-specialist"},
+		},
+		Peers: []profile.AgentAssignment{{
+			ID: "research-peer", Model: "research",
+			Definition: "Own evidence audits whose deliverable is a sourced conclusion; otherwise contribute as a peer.",
+		}},
+		Specialists: []profile.SpecialistAssignment{{
+			ID: "vision-specialist", Model: "vision",
+			Definition: "Inspect only explicitly attached images and return exact observable visual evidence to the caller.",
+		}},
 	}
 }

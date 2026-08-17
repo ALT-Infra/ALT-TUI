@@ -55,7 +55,7 @@ func TestArtifactsAreAtomicImmutableAndConversationScoped(t *testing.T) {
 		t.Fatalf("resolved artifact = (%d bytes, %v)", len(resolved.Data), err)
 	}
 	if _, err := ledger.Append(ctx, first.ID, event.Draft{
-		Kind: event.FinalCompleted, Actor: "lead",
+		Kind: event.FinalCompleted, Actor: "agent",
 		Data: event.FinalCompletedData{Answer: "done"},
 	}); err != nil {
 		t.Fatal(err)

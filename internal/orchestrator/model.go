@@ -74,7 +74,7 @@ func generateStructuredMessage[T any](
 	if err != nil {
 		return zero, err
 	}
-	if usageErr := recordUsage(ctx, ledger, sessionID, modelReference, purpose, spec, response.ResponseMeta); usageErr != nil {
+	if usageErr := recordUsage(ctx, ledger, sessionID, modelReference, purpose, spec, response); usageErr != nil {
 		return zero, usageErr
 	}
 	responseText := messageText(response)
@@ -97,7 +97,7 @@ func generateStructuredMessage[T any](
 	if err != nil {
 		return zero, fmt.Errorf("%s correction request failed: %w", purpose, err)
 	}
-	if usageErr := recordUsage(ctx, ledger, sessionID, modelReference, purpose+":correction", spec, corrected.ResponseMeta); usageErr != nil {
+	if usageErr := recordUsage(ctx, ledger, sessionID, modelReference, purpose+":correction", spec, corrected); usageErr != nil {
 		return zero, usageErr
 	}
 	value, correctionErr := decodeJSONObject[T](messageText(corrected))
@@ -269,13 +269,18 @@ func recordUsage(
 	modelReference string,
 	purpose string,
 	spec profile.Model,
-	meta *schema.ResponseMeta,
+	message *schema.Message,
 	correlationID ...string,
 ) error {
-	if meta == nil || meta.Usage == nil {
+	if message == nil || message.ResponseMeta == nil || message.ResponseMeta.Usage == nil {
 		return nil
 	}
-	usage := meta.Usage
+	usage := message.ResponseMeta.Usage
+	cache := provider.CacheUsageFromMessage(message)
+	uncachedPromptTokens := usage.PromptTokens
+	if cache.Reported {
+		uncachedPromptTokens = max(0, usage.PromptTokens-cache.ReadTokens)
+	}
 	correlation := ""
 	if len(correlationID) > 0 {
 		correlation = correlationID[0]
@@ -285,12 +290,17 @@ func recordUsage(
 		Actor:         purpose,
 		CorrelationID: correlation,
 		Data: event.ModelUsageData{
-			Model:            modelReference + ":" + spec.Name,
-			Purpose:          purpose,
-			PromptTokens:     usage.PromptTokens,
-			CompletionTokens: usage.CompletionTokens,
-			ReasoningTokens:  usage.CompletionTokensDetails.ReasoningTokens,
-			TotalTokens:      usage.TotalTokens,
+			Model:                modelReference + ":" + spec.Name,
+			Purpose:              purpose,
+			PromptTokens:         usage.PromptTokens,
+			UncachedPromptTokens: uncachedPromptTokens,
+			CachedPromptTokens:   cache.ReadTokens,
+			CacheWriteTokens:     cache.WriteTokens,
+			CacheMissTokens:      cache.MissTokens,
+			CacheUsageReported:   cache.Reported,
+			CompletionTokens:     usage.CompletionTokens,
+			ReasoningTokens:      usage.CompletionTokensDetails.ReasoningTokens,
+			TotalTokens:          usage.TotalTokens,
 		},
 	})
 	return err

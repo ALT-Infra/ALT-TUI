@@ -4,10 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"altv1/internal/event"
+
+	"github.com/fsnotify/fsnotify"
 )
 
 func (s *Store) Append(ctx context.Context, sessionID string, draft event.Draft) (event.Event, error) {
@@ -72,15 +75,15 @@ func insertEvent(ctx context.Context, tx *sql.Tx, item event.Event) error {
 
 func applySessionProjection(ctx context.Context, tx *sql.Tx, item event.Event) error {
 	status := ""
-	leadID := ""
+	leaderID := ""
 	final := ""
 	switch item.Kind {
-	case event.LeadSelected:
-		data, err := event.Decode[event.LeadSelectedData](item)
+	case event.LeadershipTransferred:
+		data, err := event.Decode[event.LeadershipTransferredData](item)
 		if err != nil {
 			return err
 		}
-		leadID = data.LeadID
+		leaderID = data.ToAgentID
 	case event.FinalCompleted:
 		data, err := event.Decode[event.FinalCompletedData](item)
 		if err != nil {
@@ -96,9 +99,9 @@ func applySessionProjection(ctx context.Context, tx *sql.Tx, item event.Event) e
 
 	query := `UPDATE sessions SET updated_at = ?`
 	args := []any{item.At.Format(time.RFC3339Nano)}
-	if leadID != "" {
+	if leaderID != "" {
 		query += `, lead_id = ?`
-		args = append(args, leadID)
+		args = append(args, leaderID)
 	}
 	if status != "" {
 		query += `, status = ?`
@@ -182,10 +185,25 @@ func scanEvent(row scanner) (event.Event, error) {
 }
 
 func (s *Store) Subscribe(ctx context.Context, sessionID string, afterSequence int64) (<-chan event.Event, func(), error) {
+	var watcher *fsnotify.Watcher
+	if s.path != "" {
+		var err error
+		watcher, err = fsnotify.NewWatcher()
+		if err != nil {
+			return nil, nil, fmt.Errorf("observe external store commits: %w", err)
+		}
+		if err := watcher.Add(filepath.Dir(s.path)); err != nil {
+			watcher.Close()
+			return nil, nil, fmt.Errorf("observe external store directory: %w", err)
+		}
+	}
 	s.appendMu.Lock()
 	history, err := s.Events(ctx, sessionID, afterSequence)
 	if err != nil {
 		s.appendMu.Unlock()
+		if watcher != nil {
+			watcher.Close()
+		}
 		return nil, nil, err
 	}
 	ch := make(chan event.Event)
@@ -194,6 +212,9 @@ func (s *Store) Subscribe(ctx context.Context, sessionID string, afterSequence i
 	if s.subs == nil {
 		s.subMu.Unlock()
 		s.appendMu.Unlock()
+		if watcher != nil {
+			watcher.Close()
+		}
 		return nil, nil, fmt.Errorf("store is closed")
 	}
 	if s.subs[sessionID] == nil {
@@ -205,8 +226,15 @@ func (s *Store) Subscribe(ctx context.Context, sessionID string, afterSequence i
 
 	go func() {
 		defer close(ch)
-		ticker := time.NewTicker(200 * time.Millisecond)
-		defer ticker.Stop()
+		if watcher != nil {
+			defer watcher.Close()
+		}
+		var fileEvents <-chan fsnotify.Event
+		var watcherErrors <-chan error
+		if watcher != nil {
+			fileEvents = watcher.Events
+			watcherErrors = watcher.Errors
+		}
 		lastSequence := afterSequence
 		emit := func(item event.Event) bool {
 			if item.Sequence <= lastSequence {
@@ -235,7 +263,13 @@ func (s *Store) Subscribe(ctx context.Context, sessionID string, afterSequence i
 			case <-subscription.done:
 				return
 			case <-subscription.signal:
-			case <-ticker.C:
+			case changed, open := <-fileEvents:
+				if !open {
+					return
+				}
+				if !s.storeFileChanged(changed.Name) {
+					continue
+				}
 				items, err := s.Events(ctx, sessionID, lastSequence)
 				if err != nil {
 					return
@@ -245,6 +279,11 @@ func (s *Store) Subscribe(ctx context.Context, sessionID string, afterSequence i
 						return
 					}
 				}
+			case _, open := <-watcherErrors:
+				if !open {
+					return
+				}
+				return
 			}
 		}
 	}()
@@ -264,6 +303,15 @@ func (s *Store) Subscribe(ctx context.Context, sessionID string, afterSequence i
 		})
 	}
 	return ch, unsubscribe, nil
+}
+
+func (s *Store) storeFileChanged(changed string) bool {
+	if s == nil || s.path == "" {
+		return false
+	}
+	target := filepath.Clean(s.path)
+	changed = filepath.Clean(changed)
+	return changed == target || changed == target+"-wal" || changed == target+"-shm"
 }
 
 func (s *Store) publish(item event.Event) {

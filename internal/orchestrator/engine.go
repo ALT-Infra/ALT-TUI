@@ -144,7 +144,7 @@ func (e *Engine) Resume(ctx context.Context, sessionID string) (*Run, error) {
 	return e.startSession(ctx, session, document, true)
 }
 
-// Continue starts another adaptive Lead turn in the same durable
+// Continue starts another adaptive leader turn in the same durable
 // conversation. Each turn keeps its own event stream while sharing the
 // conversation's pinned Team Profile, workspace, title, and transcript.
 func (e *Engine) Continue(ctx context.Context, previousSessionID, task string) (*Run, error) {
@@ -240,7 +240,7 @@ func (e *Engine) SteerInput(ctx context.Context, sessionID string, payload conte
 		return fmt.Errorf("session is not running")
 	}
 	if run.finalizing.Load() {
-		return fmt.Errorf("the Lead is already finalizing")
+		return fmt.Errorf("the leader is already finalizing")
 	}
 	item, err := e.store.AppendInput(ctx, sessionID, event.Draft{
 		Kind:  event.UserInstruction,
@@ -254,7 +254,7 @@ func (e *Engine) SteerInput(ctx context.Context, sessionID string, payload conte
 		Kind:    string(event.UserInstruction),
 		EventID: item.ID,
 	}) {
-		return fmt.Errorf("instruction was saved, but the Lead stopped before it could observe it")
+		return fmt.Errorf("instruction was saved, but the leader stopped before it could observe it")
 	}
 	return nil
 }

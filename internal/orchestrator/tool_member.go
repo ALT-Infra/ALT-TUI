@@ -16,36 +16,44 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-func (r *sessionRuntime) runToolMember(
+func (r *sessionRuntime) runSpecialist(
 	ctx context.Context,
-	member profile.MemberAssignment,
+	specialist profile.SpecialistAssignment,
 	delegation *Delegation,
 	attempt int,
 ) (string, error) {
-	capabilities := r.providers.Capabilities(r.profile.Gateway, r.profile.Models[member.Model])
-	if capabilities.ToolCalling == provider.CapabilityUnsupported {
-		return "", fmt.Errorf(
-			"authenticated gateway catalog marks member %s model %s as tool-call unsupported; ALT assignments require dynamic runtime tools",
-			member.ID,
-			r.profile.Models[member.Model].Name,
-		)
-	}
-	chat, modelSpec, err := r.providers.Model(ctx, r.profile, member.Model, provider.Text)
+	capabilities := r.providers.Capabilities(r.profile.Gateway, r.profile.Models[specialist.Model])
+	chat, modelSpec, err := r.providers.Model(ctx, r.profile, specialist.Model, provider.Text)
 	if err != nil {
 		return "", err
 	}
 	chat = r.observeModel(
-		member.Model,
-		"member:"+member.ID,
+		specialist.Model,
+		"specialist:"+specialist.ID,
 		delegation.Spec.ID,
 	)(chat)
-	toolOwner := fmt.Sprintf("member:%s:%s:%d", member.ID, delegation.Spec.ID, attempt)
-	runtimeHandlers, err := r.tools.HandlersWithCompaction(ctx, toolOwner, chat)
-	if err != nil {
-		return "", err
+	toolOwner := fmt.Sprintf("specialist:%s:%s:%d", specialist.ID, delegation.Spec.ID, attempt)
+	var handlers []adk.ChatModelAgentMiddleware
+	if capabilities.ToolCalling != provider.CapabilityUnsupported {
+		runtimeHandlers, err := r.tools.HandlersWithCompaction(
+			ctx, toolOwner, chat,
+			r.providers.Limits(r.profile.Gateway, modelSpec),
+		)
+		if err != nil {
+			return "", err
+		}
+		handlers = tooling.AgentHandlers(runtimeHandlers...)
+	} else {
+		handlers, err = r.tools.CompactionHandlers(
+			ctx, toolOwner, chat,
+			r.providers.Limits(r.profile.Gateway, modelSpec),
+		)
+		if err != nil {
+			return "", err
+		}
 	}
-	system, user := memberMessages(r.profile, member, delegation)
-	userMessage, err := r.richUserMessage(ctx, member.Model, user, delegation.Spec.Attachments)
+	system, user := specialistMessages(r.profile, specialist, delegation)
+	userMessage, err := r.richUserMessage(ctx, specialist.Model, user, delegation.Spec.Attachments)
 	if err != nil {
 		return "", err
 	}
@@ -53,15 +61,15 @@ func (r *sessionRuntime) runToolMember(
 		return "", err
 	}
 	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
-		Name:          "member-" + member.ID,
-		Description:   r.profile.MemberDefinition(member),
+		Name:          "specialist-" + specialist.ID,
+		Description:   r.profile.SpecialistDefinition(specialist),
 		Instruction:   system,
 		Model:         chat,
-		Handlers:      tooling.AgentHandlers(runtimeHandlers...),
+		Handlers:      handlers,
 		MaxIterations: unboundedAgentIterations(),
 	})
 	if err != nil {
-		return "", fmt.Errorf("create Eino member agent: %w", err)
+		return "", fmt.Errorf("create Eino specialist agent: %w", err)
 	}
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
 		Agent: agent, EnableStreaming: true, CheckPointStore: r.store,
@@ -89,7 +97,7 @@ func (r *sessionRuntime) runToolMember(
 			ctx,
 			variant,
 			delegation.Spec.ID,
-			member.ID,
+			specialist.ID,
 			true,
 		)
 		if err != nil {
@@ -102,7 +110,7 @@ func (r *sessionRuntime) runToolMember(
 		case schema.Assistant:
 			for _, call := range message.ToolCalls {
 				if _, err := r.store.Append(ctx, r.session.ID, event.Draft{
-					Kind: event.ToolCalled, Actor: member.ID,
+					Kind: event.ToolCalled, Actor: specialist.ID,
 					CorrelationID: delegation.Spec.ID,
 					Data: event.ToolCallData{
 						DelegationID: delegation.Spec.ID,
@@ -122,10 +130,10 @@ func (r *sessionRuntime) runToolMember(
 				ctx,
 				r.store,
 				r.session.ID,
-				member.Model,
-				"member:"+member.ID,
+				specialist.Model,
+				"specialist:"+specialist.ID,
 				modelSpec,
-				message.ResponseMeta,
+				message,
 				delegation.Spec.ID,
 			); err != nil {
 				return "", err
@@ -133,7 +141,7 @@ func (r *sessionRuntime) runToolMember(
 		case schema.Tool:
 			toolError, failed := tooling.ParseRecoverableToolError(messageText(message))
 			if _, err := r.store.Append(ctx, r.session.ID, event.Draft{
-				Kind: event.ToolCompleted, Actor: member.ID,
+				Kind: event.ToolCompleted, Actor: specialist.ID,
 				CorrelationID: delegation.Spec.ID,
 				Data: event.ToolCompletedData{
 					DelegationID: delegation.Spec.ID,

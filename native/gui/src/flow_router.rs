@@ -3,7 +3,7 @@
 //! The Team layout is free/radial, so an edge cannot inherit a global
 //! top-to-bottom socket direction.  This module treats nodes as rectangular
 //! obstacles, assigns every incident edge a distinct free port on the complete
-//! boundary, and routes between short outward-facing lead segments.  Direction
+//! boundary, and routes between short outward-facing endpoint extensions.  Direction
 //! remains a property of the edge; it is not encoded by an arbitrary node side.
 
 use eframe::egui;
@@ -94,7 +94,7 @@ pub(crate) fn route_flow_edges(
     let rects: HashMap<_, _> = nodes.iter().map(|node| (node.id, node.rect)).collect();
     let ports = assign_ports(&rects, edges, clearance.max(0.0));
     let mut paths = HashMap::new();
-    let lead = (clearance * 1.5).max(18.0);
+    let extension = (clearance * 1.5).max(18.0);
     let rounding = (clearance * 0.75).max(8.0);
 
     let mut stable_edges = edges.to_vec();
@@ -103,20 +103,20 @@ pub(crate) fn route_flow_edges(
         let Some(&(source, target)) = ports.get(&edge.key) else {
             continue;
         };
-        let source_lead = source.point + source.normal * lead;
-        let target_lead = target.point + target.normal * lead;
-        let mut spine = vec![source.point, source_lead];
+        let source_extension = source.point + source.normal * extension;
+        let target_extension = target.point + target.normal * extension;
+        let mut spine = vec![source.point, source_extension];
         let middle = route_visibility(
-            source_lead,
-            target_lead,
+            source_extension,
+            target_extension,
             edge.from,
             edge.to,
             nodes,
             clearance + rounding,
         );
         spine.extend(middle.into_iter().skip(1));
-        if spine.last().copied() != Some(target_lead) {
-            spine.push(target_lead);
+        if spine.last().copied() != Some(target_extension) {
+            spine.push(target_extension);
         }
         spine.push(target.point);
         simplify_polyline(&mut spine);
@@ -503,17 +503,17 @@ mod tests {
     }
 
     #[test]
-    fn reported_router_to_engineering_edge_uses_facing_sides_without_a_loop() {
-        let router_id = NodeId::from_u64(1);
+    fn reported_primary_to_engineering_edge_uses_facing_sides_without_a_loop() {
+        let primary_id = NodeId::from_u64(1);
         let engineering_id = NodeId::from_u64(2);
-        let router = egui::Rect::from_min_size(egui::pos2(400.0, 373.0), egui::vec2(180.0, 98.0));
+        let primary = egui::Rect::from_min_size(egui::pos2(400.0, 373.0), egui::vec2(180.0, 98.0));
         let engineering =
             egui::Rect::from_min_size(egui::pos2(367.0, 60.0), egui::vec2(210.0, 96.0));
         let routes = route_flow_edges(
             &[
                 FlowNode {
-                    id: router_id,
-                    rect: router,
+                    id: primary_id,
+                    rect: primary,
                 },
                 FlowNode {
                     id: engineering_id,
@@ -522,24 +522,24 @@ mod tests {
             ],
             &[FlowEdge {
                 key: "flow:route".to_owned(),
-                from: router_id,
+                from: primary_id,
                 to: engineering_id,
             }],
             16.0,
         );
         let path = routes.path("flow:route").expect("route");
-        assert_eq!(path.first().expect("source").y, router.top());
+        assert_eq!(path.first().expect("source").y, primary.top());
         assert_eq!(path.last().expect("target").y, engineering.bottom());
         assert!(
             path[1].y < path[0].y,
-            "edge left Router in the wrong direction"
+            "edge left Primary in the wrong direction"
         );
         assert!(
             path[path.len() - 2].y > path[path.len() - 1].y,
             "edge entered engineering through the wrong direction"
         );
         assert!(path.windows(2).all(|segment| segment[1].y <= segment[0].y));
-        assert_endpoint_departure(path, router, engineering);
+        assert_endpoint_departure(path, primary, engineering);
     }
 
     #[test]

@@ -31,6 +31,8 @@ type sessionRuntime struct {
 	engineOptions EngineOptions
 
 	mu                  sync.Mutex
+	surfaceLocksMu      sync.Mutex
+	surfaceLocks        map[string]*sync.Mutex
 	signalMu            sync.Mutex
 	loop                *adk.TurnLoop[Signal, *schema.Message]
 	pending             []Signal
@@ -102,8 +104,14 @@ func (r *sessionRuntime) execute(parent context.Context, recovered bool) error {
 	if state.Terminal {
 		return nil
 	}
-	if state.LeadID == "" {
-		if err := r.route(ctx); err != nil {
+	if state.LeaderID == "" {
+		if _, err := r.store.Append(ctx, r.session.ID, event.Draft{
+			Kind: event.LeadershipTransferred, Actor: "system",
+			Data: event.LeadershipTransferredData{
+				ToAgentID: r.profile.Primary.ID,
+				Reason:    "Every user turn enters through the Team primary.",
+			},
+		}); err != nil {
 			return r.fail(ctx, err)
 		}
 	}
@@ -131,11 +139,11 @@ func (r *sessionRuntime) execute(parent context.Context, recovered bool) error {
 			return &adk.GenResumeResult[Signal, *schema.Message]{Consumed: all}, nil
 		},
 		PrepareAgent: func(_ context.Context, _ *adk.TurnLoop[Signal, *schema.Message], consumed []Signal) (adk.Agent, error) {
-			return &leadTurnAgent{runtime: r, signals: append([]Signal(nil), consumed...)}, nil
+			return &activeTurnAgent{runtime: r, signals: append([]Signal(nil), consumed...)}, nil
 		},
-		OnAgentEvents: r.onLeadEvents,
+		OnAgentEvents: r.onActiveAgentEvents,
 		Store:         r.store,
-		CheckpointID:  "lead:" + r.session.ID,
+		CheckpointID:  "active-agent:" + r.session.ID,
 	})
 
 	initial := Signal{Kind: "session.ready"}
@@ -215,14 +223,9 @@ func (r *sessionRuntime) loadConversationHistory(ctx context.Context) error {
 		}
 		prior = append(prior, turn)
 	}
-	detailFrom := max(0, len(prior)-recentConversationLimit)
 	history := make([]ConversationTurn, 0, len(prior))
-	for index, turn := range prior {
-		entry := ConversationTurn{SessionID: turn.ID, Status: string(turn.Status), LeadID: turn.LeadID}
-		if index < detailFrom {
-			history = append(history, entry)
-			continue
-		}
+	for _, turn := range prior {
+		entry := ConversationTurn{SessionID: turn.ID, Status: string(turn.Status), LeaderID: turn.LeaderID}
 		items, err := r.store.Events(ctx, turn.ID, 0)
 		if err != nil {
 			return fmt.Errorf("load conversation turn %s provenance: %w", turn.ID, err)
@@ -255,8 +258,8 @@ func (r *sessionRuntime) loadConversationHistory(ctx context.Context) error {
 func sharedConversationEvent(kind event.Kind) bool {
 	switch kind {
 	case event.UserInstruction,
-		event.LeadSelected,
-		event.LeadDecision,
+		event.LeadershipTransferred,
+		event.AgentDecision,
 		event.DelegationCreated,
 		event.DelegationStarted,
 		event.DelegationReasoning,
@@ -281,73 +284,12 @@ func sharedConversationEvent(kind event.Kind) bool {
 	}
 }
 
-func (r *sessionRuntime) route(ctx context.Context) error {
-	if _, err := r.store.Append(ctx, r.session.ID, event.Draft{
-		Kind: event.RouterStarted, Actor: "router",
-	}); err != nil {
-		return err
-	}
-	system, user := routerMessages(r.profile, r.session.Task, r.conversationHistory)
-	state, err := r.projection(ctx)
-	if err != nil {
-		return err
-	}
-	userMessage, err := r.richUserMessage(ctx, r.profile.Router.Model, user, projectionAttachmentReferences(state))
-	if err != nil {
-		return err
-	}
-	sourceThrough, err := r.store.LastSequence(ctx, r.session.ID)
-	if err != nil {
-		return err
-	}
-	if _, err := r.commitWorkingView(ctx, "router", "router", sourceThrough, user); err != nil {
-		return err
-	}
-	decision, err := generateStructuredMessage[RouterDecision](
-		ctx, r.session.ID, r.store, r.providers, r.profile,
-		r.profile.Router.Model, "router", system, userMessage,
-		func(decision RouterDecision) error {
-			if _, ok := r.profile.Lead(decision.LeadID); !ok {
-				return fmt.Errorf("selected ineligible Lead %q", decision.LeadID)
-			}
-			if decision.Confidence < 0 || decision.Confidence > 1 {
-				return fmt.Errorf("confidence %.3f is outside [0,1]", decision.Confidence)
-			}
-			if strings.TrimSpace(decision.Basis) == "" {
-				return fmt.Errorf("decision basis is required")
-			}
-			return nil
-		},
-		r.observeModel(r.profile.Router.Model, "router"),
-	)
-	if err != nil {
-		return fmt.Errorf("route task: %w", err)
-	}
-	if _, ok := r.profile.Lead(decision.LeadID); !ok {
-		return fmt.Errorf("router selected ineligible Lead %q", decision.LeadID)
-	}
-	if decision.Confidence < 0 || decision.Confidence > 1 {
-		return fmt.Errorf("router confidence %.3f is outside [0,1]", decision.Confidence)
-	}
-	if strings.TrimSpace(decision.Basis) == "" {
-		return fmt.Errorf("router omitted its decision basis")
-	}
-	_, err = r.store.Append(ctx, r.session.ID, event.Draft{
-		Kind:  event.LeadSelected,
-		Actor: "router",
-		Data: event.LeadSelectedData{
-			LeadID: decision.LeadID, Confidence: decision.Confidence, Basis: decision.Basis,
-		},
-	})
-	return err
-}
-
-func (r *sessionRuntime) onLeadEvents(
+func (r *sessionRuntime) onActiveAgentEvents(
 	ctx context.Context,
 	turn *adk.TurnContext[Signal, *schema.Message],
 	events *adk.AsyncIterator[*adk.AgentEvent],
 ) error {
-	var decision *LeadDecision
+	var outcome *AgentOutcome
 	for {
 		item, ok := events.Next()
 		if !ok {
@@ -359,16 +301,30 @@ func (r *sessionRuntime) onLeadEvents(
 		if item.Output == nil || item.Output.CustomizedOutput == nil {
 			continue
 		}
-		value, ok := item.Output.CustomizedOutput.(LeadDecision)
+		value, ok := item.Output.CustomizedOutput.(AgentOutcome)
 		if !ok {
-			return fmt.Errorf("Lead returned unsupported output %T", item.Output.CustomizedOutput)
+			return fmt.Errorf("active agent returned unsupported output %T", item.Output.CustomizedOutput)
 		}
-		decision = &value
+		outcome = &value
 	}
-	if decision == nil {
-		return fmt.Errorf("Lead turn returned no decision")
+	if outcome == nil {
+		return fmt.Errorf("active agent turn returned no outcome")
 	}
-	finalized, err := r.applyDecision(ctx, *decision)
+	if strings.TrimSpace(outcome.Answer) != "" {
+		state, err := r.projection(ctx)
+		if err != nil {
+			return err
+		}
+		if err := r.completeAnswer(ctx, state.LeaderID, state.AgentTurns, outcome.Answer); err != nil {
+			return err
+		}
+		turn.Loop.Stop()
+		return nil
+	}
+	if outcome.Decision == nil {
+		return fmt.Errorf("active agent returned neither an answer nor a coordination decision")
+	}
+	finalized, err := r.applyDecision(ctx, *outcome.Decision)
 	if err != nil {
 		return err
 	}
@@ -378,96 +334,125 @@ func (r *sessionRuntime) onLeadEvents(
 	return nil
 }
 
-func (r *sessionRuntime) decideLead(ctx context.Context, signals []Signal) (LeadDecision, error) {
+func (r *sessionRuntime) runActiveAgent(ctx context.Context, signals []Signal) (AgentOutcome, error) {
 	state, err := r.projection(ctx)
 	if err != nil {
-		return LeadDecision{}, err
+		return AgentOutcome{}, err
 	}
-	lead, ok := r.profile.Lead(state.LeadID)
+	agent, ok := r.profile.Agent(state.LeaderID)
 	if !ok {
-		return LeadDecision{}, fmt.Errorf("selected Lead %s is absent from pinned profile", state.LeadID)
+		return AgentOutcome{}, fmt.Errorf("current leader %s is absent from pinned profile", state.LeaderID)
 	}
-	turn := state.LeadTurns + 1
+	turn := state.AgentTurns + 1
 	kinds := make([]string, 0, len(signals))
 	for _, signal := range signals {
 		kinds = append(kinds, signal.Kind)
 	}
 	if _, err := r.store.Append(ctx, r.session.ID, event.Draft{
-		Kind: event.LeadTurnStarted, Actor: lead.ID,
-		Data: event.LeadTurnData{Turn: turn, SignalKinds: kinds},
+		Kind: event.AgentTurnStarted, Actor: agent.ID,
+		Data: event.AgentTurnData{AgentID: agent.ID, Turn: turn, SignalKinds: kinds},
 	}); err != nil {
-		return LeadDecision{}, err
+		return AgentOutcome{}, err
 	}
-	system, user := leadMessages(r.profile, lead, state, signals)
-	attachmentReferences := projectionAttachmentReferences(state)
-	userMessage, err := r.richUserMessage(ctx, lead.Model, user, attachmentReferences)
+	unlockSurface := r.lockModelSurface(agent.ID)
+	defer unlockSurface()
+	surface, err := loadModelSurface(ctx, r.store, r.session.ConversationID, agent.ID)
 	if err != nil {
-		return LeadDecision{}, err
+		return AgentOutcome{}, err
 	}
-	if _, err := r.commitWorkingView(ctx, "lead", lead.ID, state.LastSequence, user); err != nil {
-		return LeadDecision{}, err
-	}
-	decision, err := r.generateLeadDecisionWithTools(ctx, lead, turn, system, user, userMessage, attachmentReferences, state.WorkCount() == 0, func(decision LeadDecision) error {
-		if strings.TrimSpace(decision.Assessment) == "" {
-			return fmt.Errorf("assessment is empty")
-		}
-		if !decision.Finalize && len(decision.Delegations) == 0 && len(decision.PeerTurns) == 0 && state.WorkCount() == 0 {
-			return fmt.Errorf("no delegation or final answer was produced while no work was active")
-		}
-		if decision.Finalize && strings.TrimSpace(decision.FinalBrief) == "" {
-			return fmt.Errorf("finalize is true but final_brief is empty")
-		}
-		return nil
-	})
+	system, workingView := activeAgentMessages(
+		r.profile, agent, state, signals, surface.LastSessionID != r.session.ID,
+	)
+	exactUserMessage, err := r.richExactInputMessage(ctx, agent.Model, state.TaskInput)
 	if err != nil {
-		return LeadDecision{}, fmt.Errorf("Lead turn %d: %w", turn, err)
+		return AgentOutcome{}, err
 	}
-	decision.observedWork = state.WorkCount()
-	return decision, nil
+	if _, err := r.commitWorkingView(ctx, "agent", agent.ID, state.LastSequence, workingView); err != nil {
+		return AgentOutcome{}, err
+	}
+	outcome, err := r.generateAgentOutcome(ctx, agent, turn, system, exactUserMessage, workingView, state.WorkCount(), surface)
+	if err != nil {
+		return AgentOutcome{}, fmt.Errorf("agent %s turn %d: %w", agent.ID, turn, err)
+	}
+	if outcome.Decision != nil {
+		outcome.Decision.observedWork = state.WorkCount()
+	}
+	return outcome, nil
 }
 
-func (r *sessionRuntime) applyDecision(ctx context.Context, decision LeadDecision) (bool, error) {
+func (r *sessionRuntime) applyDecision(ctx context.Context, decision AgentDecision) (bool, error) {
 	state, err := r.projection(ctx)
 	if err != nil {
 		return false, err
 	}
-	lead, _ := r.profile.Lead(state.LeadID)
+	agent, ok := r.profile.Agent(state.LeaderID)
+	if !ok {
+		return false, fmt.Errorf("current leader %s is absent", state.LeaderID)
+	}
 
-	for _, id := range uniqueStrings(decision.Cancel) {
-		if err := r.cancelWork(ctx, id, "cancelled by Lead coordination decision"); err != nil {
-			return false, err
+	if decision.Handoff != nil && (len(decision.Delegations) > 0 || len(decision.PeerTurns) > 0) {
+		return false, fmt.Errorf("leadership handoff must be an exclusive coordination action")
+	}
+	cancellations := uniqueStrings(decision.Cancel)
+	for _, id := range cancellations {
+		if state.Delegations[id] == nil && state.PeerTurns[id] == nil {
+			return false, fmt.Errorf("cannot cancel unknown work %s", id)
 		}
 	}
-
-	specs, err := r.materializeDelegations(state, lead, decision.Delegations)
+	var handoffPeer profile.AgentAssignment
+	handoffReason := ""
+	if decision.Handoff != nil {
+		handoffPeer, ok = r.profile.PeerAgentFor(agent, strings.TrimSpace(decision.Handoff.PeerID))
+		if !ok {
+			return false, fmt.Errorf("agent %s cannot hand leadership to %s", agent.ID, decision.Handoff.PeerID)
+		}
+		handoffReason = strings.TrimSpace(decision.Handoff.Reason)
+		if handoffReason == "" {
+			return false, fmt.Errorf("leadership handoff requires a reason")
+		}
+	}
+	specs, err := r.materializeDelegations(state, agent, decision.Delegations)
 	if err != nil {
 		return false, err
 	}
-	peerSpecs, err := r.materializePeerTurns(state, lead, decision.PeerTurns)
+	for _, spec := range specs {
+		for _, dependency := range spec.DependsOn {
+			if containsString(cancellations, dependency) {
+				return false, fmt.Errorf("delegation %s depends on work %s cancelled by the same decision", spec.Key, dependency)
+			}
+		}
+	}
+	peerSpecs, err := r.materializePeerTurns(state, agent, decision.PeerTurns)
 	if err != nil {
 		return false, err
 	}
-	if !decision.Finalize && len(specs) == 0 && len(peerSpecs) == 0 && decision.observedWork == 0 {
+	if decision.Handoff == nil && len(specs) == 0 && len(peerSpecs) == 0 && decision.observedWork == 0 {
 		current, err := r.projection(ctx)
 		if err != nil {
 			return false, err
 		}
 		if current.WorkCount() == 0 {
 			return false, fmt.Errorf(
-				"Lead produced no delegation or final answer while no work was active",
+				"active agent produced no work, handoff, or user answer while no work was active",
 			)
 		}
 	}
+	for _, id := range cancellations {
+		if err := r.cancelWork(ctx, id, "cancelled by active-agent coordination decision"); err != nil {
+			return false, err
+		}
+	}
 	_, err = r.store.Append(ctx, r.session.ID, event.Draft{
-		Kind:  event.LeadDecision,
-		Actor: lead.ID,
-		Data: event.LeadDecisionData{
-			Turn:          state.LeadTurns,
+		Kind:  event.AgentDecision,
+		Actor: agent.ID,
+		Data: event.AgentDecisionData{
+			AgentID:       agent.ID,
+			Turn:          state.AgentTurns,
 			Assessment:    decision.Assessment,
 			Delegations:   specs,
 			PeerTurns:     peerSpecs,
-			Cancellations: uniqueStrings(decision.Cancel),
-			WillFinalize:  decision.Finalize,
+			Cancellations: cancellations,
+			HandoffTo:     handoffPeerID(decision.Handoff),
 		},
 	})
 	if err != nil {
@@ -475,7 +460,7 @@ func (r *sessionRuntime) applyDecision(ctx context.Context, decision LeadDecisio
 	}
 	for _, spec := range specs {
 		if _, err := r.store.Append(ctx, r.session.ID, event.Draft{
-			Kind: event.DelegationCreated, Actor: lead.ID,
+			Kind: event.DelegationCreated, Actor: agent.ID,
 			CorrelationID: spec.ID, Data: spec,
 		}); err != nil {
 			return false, err
@@ -483,25 +468,32 @@ func (r *sessionRuntime) applyDecision(ctx context.Context, decision LeadDecisio
 	}
 	for _, spec := range peerSpecs {
 		if _, err := r.store.Append(ctx, r.session.ID, event.Draft{
-			Kind: event.PeerTurnCreated, Actor: lead.ID,
+			Kind: event.PeerTurnCreated, Actor: agent.ID,
 			CorrelationID: spec.ID, Data: spec,
 		}); err != nil {
 			return false, err
 		}
 	}
 	if _, err := r.store.Append(ctx, r.session.ID, event.Draft{
-		Kind: event.LeadTurnCompleted, Actor: lead.ID,
-		Data: event.LeadTurnData{Turn: state.LeadTurns, Assessment: decision.Assessment},
+		Kind: event.AgentTurnCompleted, Actor: agent.ID,
+		Data: event.AgentTurnData{AgentID: agent.ID, Turn: state.AgentTurns, Assessment: decision.Assessment},
 	}); err != nil {
 		return false, err
 	}
 
-	if decision.Finalize {
-		r.cancelActiveDelegations(ctx, "Lead finalized with sufficient evidence")
-		if err := r.generateFinal(ctx, lead, decision.FinalBrief); err != nil {
+	if decision.Handoff != nil {
+		transferred, err := r.store.Append(ctx, r.session.ID, event.Draft{
+			Kind: event.LeadershipTransferred, Actor: agent.ID,
+			Data: event.LeadershipTransferredData{FromAgentID: agent.ID, ToAgentID: handoffPeer.ID, Reason: handoffReason},
+		})
+		if err != nil {
 			return false, err
 		}
-		return true, nil
+		r.pushSignal(Signal{Kind: string(event.LeadershipTransferred), EventID: transferred.ID})
+		return false, nil
+	}
+	if len(cancellations) > 0 && len(specs) == 0 && len(peerSpecs) == 0 {
+		r.pushSignal(Signal{Kind: "work.cancelled"})
 	}
 	if err := r.scheduleReady(ctx); err != nil {
 		return false, err
@@ -511,19 +503,21 @@ func (r *sessionRuntime) applyDecision(ctx context.Context, decision LeadDecisio
 
 func (r *sessionRuntime) materializePeerTurns(
 	state *Projection,
-	lead profile.LeadAssignment,
+	agent profile.AgentAssignment,
 	proposals []ProposedPeerTurn,
 ) ([]event.PeerTurnSpec, error) {
 	type collaboration struct {
-		peerID string
-		round  int
-		active bool
+		callerID string
+		peerID   string
+		round    int
+		active   bool
 	}
 	known := make(map[string]collaboration)
 	for _, turn := range state.SortedPeerTurns() {
 		current := known[turn.Spec.CollaborationID]
 		if current.peerID == "" {
 			current.peerID = turn.Spec.PeerID
+			current.callerID = turn.Spec.CallerID
 		}
 		if turn.Spec.Round > current.round {
 			current.round = turn.Spec.Round
@@ -543,9 +537,9 @@ func (r *sessionRuntime) materializePeerTurns(
 			return nil, fmt.Errorf("peer turn key %q is duplicated", key)
 		}
 		keys[key] = true
-		peer, ok := r.profile.PeerMemberFor(lead, proposal.PeerID)
+		peer, ok := r.profile.PeerAgentFor(agent, proposal.PeerID)
 		if !ok {
-			return nil, fmt.Errorf("Lead %s has no peer relationship with %s", lead.ID, proposal.PeerID)
+			return nil, fmt.Errorf("agent %s has no peer relationship with %s", agent.ID, proposal.PeerID)
 		}
 		if strings.TrimSpace(proposal.Objective) == "" {
 			return nil, fmt.Errorf("peer turn %s has an empty objective", key)
@@ -563,8 +557,8 @@ func (r *sessionRuntime) materializePeerTurns(
 			collaborationID = id.String()
 		}
 		current, exists := known[collaborationID]
-		if exists && current.peerID != peer.ID {
-			return nil, fmt.Errorf("collaboration %s belongs to peer %s, not %s", collaborationID, current.peerID, peer.ID)
+		if exists && (current.peerID != peer.ID || current.callerID != agent.ID) {
+			return nil, fmt.Errorf("collaboration %s belongs to %s consulting %s", collaborationID, current.callerID, current.peerID)
 		}
 		if current.active || usedCollaborations[collaborationID] {
 			return nil, fmt.Errorf("collaboration %s already has an active or newly planned turn; wait for it before continuing", collaborationID)
@@ -575,13 +569,13 @@ func (r *sessionRuntime) materializePeerTurns(
 		}
 		spec := event.PeerTurnSpec{
 			ID: id.String(), Key: key, CollaborationID: collaborationID,
-			PeerID: peer.ID, Objective: strings.TrimSpace(proposal.Objective),
+			PeerID: peer.ID, CallerID: agent.ID, Objective: strings.TrimSpace(proposal.Objective),
 			Context:     strings.TrimSpace(proposal.Context),
 			Attachments: attachments,
 			Round:       current.round + 1,
 		}
 		usedCollaborations[collaborationID] = true
-		known[collaborationID] = collaboration{peerID: peer.ID, round: spec.Round, active: true}
+		known[collaborationID] = collaboration{callerID: agent.ID, peerID: peer.ID, round: spec.Round, active: true}
 		result = append(result, spec)
 	}
 	return result, nil
@@ -589,7 +583,7 @@ func (r *sessionRuntime) materializePeerTurns(
 
 func (r *sessionRuntime) materializeDelegations(
 	state *Projection,
-	lead profile.LeadAssignment,
+	agent profile.AgentAssignment,
 	proposals []ProposedDelegation,
 ) ([]event.DelegationSpec, error) {
 	known := make(map[string]event.DelegationSpec, len(state.Delegations)+len(proposals))
@@ -605,9 +599,9 @@ func (r *sessionRuntime) materializeDelegations(
 		if _, exists := keys[proposal.Key]; exists {
 			return nil, fmt.Errorf("delegation key %q is duplicated", proposal.Key)
 		}
-		_, ok := r.profile.CallableMemberFor(lead, proposal.MemberID)
+		_, ok := r.profile.SpecialistFor(agent, proposal.SpecialistID)
 		if !ok {
-			return nil, fmt.Errorf("Lead %s cannot access member %s", lead.ID, proposal.MemberID)
+			return nil, fmt.Errorf("agent %s cannot access specialist %s", agent.ID, proposal.SpecialistID)
 		}
 		if strings.TrimSpace(proposal.Objective) == "" {
 			return nil, fmt.Errorf("delegation %s has an empty objective", proposal.Key)
@@ -637,14 +631,15 @@ func (r *sessionRuntime) materializeDelegations(
 			}
 		}
 		spec := event.DelegationSpec{
-			ID:          id.String(),
-			Key:         proposal.Key,
-			MemberID:    proposal.MemberID,
-			Objective:   strings.TrimSpace(proposal.Objective),
-			Context:     strings.TrimSpace(proposal.Context),
-			Attachments: attachments,
-			DependsOn:   dependencies,
-			Depth:       depth,
+			ID:           id.String(),
+			Key:          proposal.Key,
+			SpecialistID: proposal.SpecialistID,
+			CallerID:     agent.ID,
+			Objective:    strings.TrimSpace(proposal.Objective),
+			Context:      strings.TrimSpace(proposal.Context),
+			Attachments:  attachments,
+			DependsOn:    dependencies,
+			Depth:        depth,
 		}
 		keys[proposal.Key] = spec.ID
 		known[spec.ID] = spec
@@ -713,14 +708,14 @@ func (r *sessionRuntime) executeDelegation(parent context.Context, delegationID 
 	if delegation == nil || delegation.Status == DelegationCompleted || delegation.Status == DelegationCancelled {
 		return
 	}
-	lead, ok := r.profile.Lead(state.LeadID)
+	caller, ok := r.profile.Agent(delegation.Spec.CallerID)
 	if !ok {
-		r.stopWithError(fmt.Errorf("selected Lead %s is absent", state.LeadID))
+		r.stopWithError(fmt.Errorf("delegation caller %s is absent", delegation.Spec.CallerID))
 		return
 	}
-	member, ok := r.profile.CallableMemberFor(lead, delegation.Spec.MemberID)
+	specialist, ok := r.profile.SpecialistFor(caller, delegation.Spec.SpecialistID)
 	if !ok {
-		r.stopWithError(fmt.Errorf("member %s is not permitted", delegation.Spec.MemberID))
+		r.stopWithError(fmt.Errorf("specialist %s is not permitted", delegation.Spec.SpecialistID))
 		return
 	}
 	ctx, cancel := context.WithCancel(parent)
@@ -735,7 +730,7 @@ func (r *sessionRuntime) executeDelegation(parent context.Context, delegationID 
 	}()
 
 	if _, err := r.store.Append(ctx, r.session.ID, event.Draft{
-		Kind: event.DelegationStarted, Actor: member.ID,
+		Kind: event.DelegationStarted, Actor: specialist.ID,
 		CorrelationID: delegationID,
 		Data:          event.DelegationStartedData{DelegationID: delegationID, Attempt: attempt},
 	}); err != nil {
@@ -743,22 +738,22 @@ func (r *sessionRuntime) executeDelegation(parent context.Context, delegationID 
 		return
 	}
 	var raw strings.Builder
-	rawResult, runErr := r.runToolMember(ctx, member, delegation, attempt)
+	rawResult, runErr := r.runSpecialist(ctx, specialist, delegation, attempt)
 	raw.WriteString(rawResult)
 	if runErr != nil {
-		r.handleDelegationFailure(parent, delegationID, member.ID, attempt, runErr)
+		r.handleDelegationFailure(parent, delegationID, specialist.ID, attempt, runErr)
 		return
 	}
-	result, parseErr := decodeJSONObject[MemberResult](raw.String())
+	result, parseErr := decodeJSONObject[SpecialistResult](raw.String())
 	if parseErr != nil {
-		result = MemberResult{Result: strings.TrimSpace(raw.String())}
+		result = SpecialistResult{Result: strings.TrimSpace(raw.String())}
 	}
 	if strings.TrimSpace(result.Result) == "" {
-		r.handleDelegationFailure(parent, delegationID, member.ID, attempt, fmt.Errorf("member returned an empty result"))
+		r.handleDelegationFailure(parent, delegationID, specialist.ID, attempt, fmt.Errorf("specialist returned an empty result"))
 		return
 	}
 	completed, err := r.store.Append(parent, r.session.ID, event.Draft{
-		Kind: event.DelegationCompleted, Actor: member.ID,
+		Kind: event.DelegationCompleted, Actor: specialist.ID,
 		CorrelationID: delegationID,
 		Data: event.DelegationCompletedData{
 			DelegationID: delegationID,
@@ -811,137 +806,32 @@ func (r *sessionRuntime) handleDelegationFailure(
 	r.pushSignal(Signal{Kind: string(event.DelegationFailed), EventID: failed.ID, DelegationID: delegationID})
 }
 
-func (r *sessionRuntime) generateFinal(ctx context.Context, lead profile.LeadAssignment, brief string) error {
+func (r *sessionRuntime) completeAnswer(ctx context.Context, agentID string, turn int, answer string) error {
 	r.run.finalizing.Store(true)
-	state, err := r.projection(ctx)
-	if err != nil {
-		return err
+	answer = strings.TrimSpace(answer)
+	if answer == "" {
+		return fmt.Errorf("active agent returned an empty user answer")
 	}
+	r.cancelActiveDelegations(ctx, "current leader answered the user")
 	if _, err := r.store.Append(ctx, r.session.ID, event.Draft{
-		Kind: event.FinalStarted, Actor: lead.ID,
+		Kind: event.AgentTurnCompleted, Actor: agentID,
+		Data: event.AgentTurnData{AgentID: agentID, Turn: turn, Assessment: "Answered the user directly."},
 	}); err != nil {
 		return err
 	}
-	chat, modelSpec, err := r.providers.Model(ctx, r.profile, lead.Model, provider.Text)
-	if err != nil {
+	if _, err := r.store.Append(ctx, r.session.ID, event.Draft{
+		Kind: event.FinalStarted, Actor: agentID,
+	}); err != nil {
 		return err
-	}
-	chat = r.observeModel(lead.Model, "final:"+lead.ID)(chat)
-	system, user := finalMessages(r.profile, lead, state, brief)
-	userMessage, err := r.richUserMessage(ctx, lead.Model, user, projectionAttachmentReferences(state))
-	if err != nil {
-		return err
-	}
-	if _, err := r.commitWorkingView(ctx, "final", lead.ID, state.LastSequence, user); err != nil {
-		return err
-	}
-	handlers, err := r.tools.HandlersWithCompaction(ctx, "final:"+lead.ID, chat)
-	if err != nil {
-		return err
-	}
-	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
-		Name: "alt-final", Description: "Lead final synthesis",
-		Instruction:   system + "\nUse inherited runtime tools only if verification is still necessary. Never narrate a future tool call; call it or return the complete answer.",
-		Model:         chat,
-		Handlers:      tooling.AgentHandlers(handlers...),
-		MaxIterations: unboundedAgentIterations(),
-	})
-	if err != nil {
-		return fmt.Errorf("create Eino final Lead agent: %w", err)
-	}
-	runner := adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent: agent, EnableStreaming: true, CheckPointStore: r.store,
-	})
-	iterator := runner.Run(
-		ctx,
-		[]*schema.Message{userMessage},
-		adk.WithCheckPointID("final:"+r.session.ID),
-	)
-	var answer string
-	reasoningBuffer := newEventTextBuffer(1024, func(text string) error {
-		_, err := r.store.Append(ctx, r.session.ID, event.Draft{
-			Kind: event.FinalReasoning, Actor: lead.ID,
-			Data: event.TextDeltaData{Text: text},
-		})
-		return err
-	})
-	for {
-		item, ok := iterator.Next()
-		if !ok {
-			break
-		}
-		if item.Err != nil {
-			return item.Err
-		}
-		if item.Output == nil || item.Output.MessageOutput == nil {
-			continue
-		}
-		variant := item.Output.MessageOutput
-		message, err := r.consumeAgentMessage(ctx, variant, "", lead.ID, false)
-		if err != nil {
-			return err
-		}
-		if message == nil {
-			continue
-		}
-		switch variant.Role {
-		case schema.Assistant:
-			for _, call := range message.ToolCalls {
-				if _, err := r.store.Append(ctx, r.session.ID, event.Draft{
-					Kind: event.ToolCalled, Actor: lead.ID,
-					Data: event.ToolCallData{
-						ToolCallID: call.ID, Tool: call.Function.Name,
-						Provider:  r.tools.ProviderForTool(ctx, call.Function.Name),
-						Arguments: call.Function.Arguments,
-					},
-				}); err != nil {
-					return err
-				}
-			}
-			if text := strings.TrimSpace(messageText(message)); text != "" && len(message.ToolCalls) == 0 {
-				answer = text
-			}
-			if reasoning := messageReasoning(message); reasoning != "" && r.profile.Policy.PersistReasoning {
-				if err := reasoningBuffer.Add(reasoning); err != nil {
-					return err
-				}
-			}
-			if err := recordUsage(
-				ctx, r.store, r.session.ID, lead.Model,
-				"final:"+lead.ID, modelSpec, message.ResponseMeta,
-			); err != nil {
-				return err
-			}
-		case schema.Tool:
-			toolError, failed := tooling.ParseRecoverableToolError(messageText(message))
-			if _, err := r.store.Append(ctx, r.session.ID, event.Draft{
-				Kind: event.ToolCompleted, Actor: lead.ID,
-				Data: event.ToolCompletedData{
-					ToolCallID: message.ToolCallID,
-					Tool:       firstNonEmpty(message.ToolName, variant.ToolName),
-					Failed:     failed,
-					Error:      toolError,
-					Result:     messageText(message),
-				},
-			}); err != nil {
-				return err
-			}
-		}
-	}
-	if err := reasoningBuffer.Flush(); err != nil {
-		return err
-	}
-	if strings.TrimSpace(answer) == "" {
-		return fmt.Errorf("Lead returned an empty final answer")
 	}
 	if _, err := r.store.Append(ctx, r.session.ID, event.Draft{
-		Kind: event.FinalTextDelta, Actor: lead.ID,
+		Kind: event.FinalTextDelta, Actor: agentID,
 		Data: event.TextDeltaData{Text: answer},
 	}); err != nil {
 		return err
 	}
-	_, err = r.store.Append(ctx, r.session.ID, event.Draft{
-		Kind: event.FinalCompleted, Actor: lead.ID,
+	_, err := r.store.Append(ctx, r.session.ID, event.Draft{
+		Kind: event.FinalCompleted, Actor: agentID,
 		Data: event.FinalCompletedData{Answer: answer},
 	})
 	return err
@@ -1012,7 +902,7 @@ func (r *sessionRuntime) cancelWork(ctx context.Context, id, reason string) erro
 		return nil
 	}
 	if _, err := r.store.Append(ctx, r.session.ID, event.Draft{
-		Kind: event.PeerTurnCancelled, Actor: state.LeadID, CorrelationID: id,
+		Kind: event.PeerTurnCancelled, Actor: state.LeaderID, CorrelationID: id,
 		Data: event.PeerTurnCancelledData{PeerTurnID: id, Reason: reason},
 	}); err != nil {
 		return err
@@ -1039,7 +929,7 @@ func (r *sessionRuntime) cancelDelegation(ctx context.Context, id, reason string
 		return nil
 	}
 	if _, err := r.store.Append(ctx, r.session.ID, event.Draft{
-		Kind: event.DelegationCancelled, Actor: state.LeadID,
+		Kind: event.DelegationCancelled, Actor: state.LeaderID,
 		CorrelationID: id,
 		Data:          event.DelegationCancelledData{DelegationID: id, Reason: reason},
 	}); err != nil {
@@ -1136,4 +1026,20 @@ func uniqueStrings(values []string) []string {
 	}
 	sort.Strings(result)
 	return result
+}
+
+func containsString(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func handoffPeerID(handoff *ProposedHandoff) string {
+	if handoff == nil {
+		return ""
+	}
+	return strings.TrimSpace(handoff.PeerID)
 }

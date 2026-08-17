@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"altv1/internal/provider"
+
 	localbackend "github.com/cloudwego/eino-ext/adk/backend/local"
 	"github.com/cloudwego/eino/adk"
 	adkfilesystem "github.com/cloudwego/eino/adk/filesystem"
@@ -28,6 +30,7 @@ var filesystemTools = []string{
 func (r *Runtime) filesystemTools(
 	ctx context.Context,
 	owner string,
+	budget *contextBudget,
 ) ([]tool.BaseTool, string, adk.ChatModelAgentMiddleware, error) {
 	enabled := make(map[string]bool, len(filesystemTools))
 	for _, name := range filesystemTools {
@@ -77,7 +80,7 @@ func (r *Runtime) filesystemTools(
 	// working budget. Their exact results are offloaded first, and the retained
 	// placeholder remains addressable through read_file. Both paths use the
 	// request's durable archive rather than an ephemeral process directory.
-	reducer, err := r.toolResultReductionHandler(ctx, owner, reductionBackend)
+	reducer, err := r.toolResultReductionHandler(ctx, owner, reductionBackend, budget)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("create Eino tool-result reduction middleware: %w", err)
 	}
@@ -88,14 +91,24 @@ func (r *Runtime) toolResultReductionHandler(
 	ctx context.Context,
 	owner string,
 	backend reduction.Backend,
+	budgets ...*contextBudget,
 ) (adk.ChatModelAgentMiddleware, error) {
-	return reduction.New(ctx, &reduction.Config{
-		Backend:                   backend,
-		SkipClear:                 false,
-		ReadFileToolName:          filesystemmw.ToolNameReadFile,
-		MaxTokensForClear:         80_000,
-		ClearRetentionSuffixLimit: 2,
-		ClearAtLeastTokens:        16_000,
+	budget := newContextBudget(provider.ModelLimits{})
+	if len(budgets) > 0 && budgets[0] != nil {
+		budget = budgets[0]
+	}
+	maxVisibleLength := budget.hardPromptCapacity(0)
+	if maxVisibleLength <= 0 {
+		maxVisibleLength = int(^uint(0) >> 1)
+	}
+	static, err := reduction.New(ctx, &reduction.Config{
+		Backend:          backend,
+		SkipClear:        true,
+		ReadFileToolName: filesystemmw.ToolNameReadFile,
+		// A single result cannot claim more bytes than the model's entire
+		// discovered prompt capacity. Unknown capacity disables this immediate
+		// truncation; the runtime resource policy remains a separate boundary.
+		MaxLengthForTrunc: maxVisibleLength,
 		GenTruncOffloadFilePath: func(_ context.Context, detail *reduction.ToolDetail) (string, error) {
 			if detail == nil || detail.ToolContext == nil {
 				return r.toolOutputPathFor(owner, "tool", ""), nil
@@ -109,10 +122,64 @@ func (r *Runtime) toolResultReductionHandler(
 			return r.toolOutputPathFor(owner, "cleared:"+detail.ToolContext.Name, detail.ToolContext.CallID), nil
 		},
 	})
+	if err != nil {
+		return nil, err
+	}
+	return &adaptiveToolReduction{
+		ChatModelAgentMiddleware: static,
+		ctx:                      ctx, runtime: r, owner: owner, backend: backend, budget: budget,
+	}, nil
 }
 
-func Supported() []string {
-	return append([]string(nil), allRuntimeTools...)
+type adaptiveToolReduction struct {
+	adk.ChatModelAgentMiddleware
+	ctx     context.Context
+	runtime *Runtime
+	owner   string
+	backend reduction.Backend
+	budget  *contextBudget
+}
+
+func (m *adaptiveToolReduction) BeforeModelRewriteState(
+	ctx context.Context,
+	state *adk.ChatModelAgentState,
+	modelContext *adk.ModelContext,
+) (context.Context, *adk.ChatModelAgentState, error) {
+	if state == nil || m == nil || m.budget == nil {
+		return ctx, state, nil
+	}
+	plan := m.budget.plan(state.Messages, state.ToolInfos)
+	if !plan.Known || plan.Estimated < plan.HighWater {
+		return ctx, state, nil
+	}
+	clearAtLeast := plan.Estimated - plan.LowWater
+	if clearAtLeast <= 0 {
+		return ctx, state, nil
+	}
+	dynamic, err := reduction.New(m.ctx, &reduction.Config{
+		Backend:           m.backend,
+		SkipTruncation:    true,
+		SkipClear:         false,
+		ReadFileToolName:  filesystemmw.ToolNameReadFile,
+		TokenCounter:      m.budget.summarizationTokenCounter,
+		MaxTokensForClear: int64(plan.HighWater),
+		// The current completed tool round is a protocol dependency, not an
+		// arbitrary history preference. Older rounds are exact-addressable.
+		ClearRetentionSuffixLimit: 1,
+		// Eviction is applied only when it reaches the calculated low-water
+		// mark and can therefore avoid immediate lossy summarization.
+		ClearAtLeastTokens: int64(clearAtLeast),
+		GenClearOffloadFilePath: func(_ context.Context, detail *reduction.ToolDetail) (string, error) {
+			if detail == nil || detail.ToolContext == nil {
+				return m.runtime.toolOutputPathFor(m.owner, "cleared-tool", ""), nil
+			}
+			return m.runtime.toolOutputPathFor(m.owner, "cleared:"+detail.ToolContext.Name, detail.ToolContext.CallID), nil
+		},
+	})
+	if err != nil {
+		return ctx, state, err
+	}
+	return dynamic.BeforeModelRewriteState(ctx, state, modelContext)
 }
 
 func toggle(enabled bool) *filesystemmw.ToolConfig {

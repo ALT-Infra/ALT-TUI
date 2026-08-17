@@ -36,6 +36,10 @@ type Capabilities struct {
 type GatewayRoute struct {
 	ID    string `json:"id"`
 	Label string `json:"label"`
+	// MetadataCatalog is the exact models.dev provider namespace describing
+	// this gateway route. It is adapter-owned because model IDs are only
+	// meaningful inside a route; consumers never guess cross-provider names.
+	MetadataCatalog string `json:"metadata_catalog,omitempty"`
 }
 
 type AuthenticationKind string
@@ -83,6 +87,7 @@ type CatalogModel struct {
 	ID           string       `json:"id"`
 	DisplayName  string       `json:"display_name,omitempty"`
 	Capabilities Capabilities `json:"capabilities"`
+	Limits       ModelLimits  `json:"limits,omitempty"`
 }
 
 type Gateway interface {
@@ -102,12 +107,25 @@ type Registry struct {
 	mu           sync.RWMutex
 	gateways     map[string]Gateway
 	capabilities map[string]Capabilities
+	limits       map[string]ModelLimits
+	metadata     CatalogMetadataSource
+	metadataErr  error
 }
 
 func NewRegistry() *Registry {
+	return NewRegistryWithOptions(RegistryOptions{})
+}
+
+type RegistryOptions struct {
+	Metadata CatalogMetadataSource
+}
+
+func NewRegistryWithOptions(options RegistryOptions) *Registry {
 	return &Registry{
 		gateways:     make(map[string]Gateway),
 		capabilities: make(map[string]Capabilities),
+		limits:       make(map[string]ModelLimits),
+		metadata:     options.Metadata,
 	}
 }
 
@@ -213,9 +231,10 @@ func (r *Registry) Model(ctx context.Context, p profile.Profile, reference strin
 	if err != nil {
 		return nil, profile.Model{}, fmt.Errorf("create %s model %s: %w", p.Gateway, spec.Name, err)
 	}
-	return &capabilityAwareModel{
+	capabilityAware := &capabilityAwareModel{
 		base: instance, registry: r, gateway: p.Gateway, spec: spec,
-	}, spec, nil
+	}
+	return normalizeModelFailures(capabilityAware), spec, nil
 }
 
 func (r *Registry) markImageUnsupported(gatewayID string, spec profile.Model) {
@@ -244,6 +263,15 @@ func (r *Registry) Catalog(ctx context.Context, name string) ([]CatalogModel, er
 	if err != nil {
 		return nil, fmt.Errorf("list %s models: %w", name, err)
 	}
+	if r.metadata != nil {
+		enriched, metadataErr := r.metadata.Enrich(ctx, normalizeDescriptor(gateway.Descriptor()), models)
+		r.mu.Lock()
+		r.metadataErr = metadataErr
+		r.mu.Unlock()
+		if metadataErr == nil {
+			models = enriched
+		}
+	}
 	r.mu.Lock()
 	for _, item := range models {
 		identity := CatalogIdentity(item)
@@ -256,9 +284,29 @@ func (r *Registry) Catalog(ctx context.Context, name string) ([]CatalogModel, er
 			}
 		}
 		r.capabilities[identity] = item.Capabilities
+		r.limits[identity] = item.Limits
 	}
 	r.mu.Unlock()
 	return models, nil
+}
+
+// Limits returns current route-specific model constraints discovered from the
+// authenticated gateway catalog and its adapter-declared metadata namespace.
+// Zero fields are honest unknowns; callers must not replace them with a
+// fabricated universal model size.
+func (r *Registry) Limits(gatewayID string, spec profile.Model) ModelLimits {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.limits[selectionIdentity(strings.ToLower(strings.TrimSpace(gatewayID)), spec)]
+}
+
+// MetadataError exposes a non-fatal enrichment failure for diagnostics. Model
+// identity validation remains gateway-authenticated even when public metadata
+// is temporarily unavailable.
+func (r *Registry) MetadataError() error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.metadataErr
 }
 
 func (r *Registry) Capabilities(gatewayID string, spec profile.Model) Capabilities {

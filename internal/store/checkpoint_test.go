@@ -22,6 +22,12 @@ func TestCheckpointPointerCanBeDeletedWithoutLosingExactVersions(t *testing.T) {
 	if err := ledger.Set(ctx, key, first); err != nil {
 		t.Fatal(err)
 	}
+	if err := ledger.Set(ctx, key, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Set(ctx, key, second); err != nil {
+		t.Fatal(err)
+	}
 	if err := ledger.Set(ctx, key, second); err != nil {
 		t.Fatal(err)
 	}
@@ -34,6 +40,12 @@ func TestCheckpointPointerCanBeDeletedWithoutLosingExactVersions(t *testing.T) {
 	}
 	if _, found, err := ledger.Get(ctx, key); err != nil || found {
 		t.Fatalf("deleted checkpoint pointer = (%v, %v)", found, err)
+	}
+	if err := ledger.Set(ctx, key, second); err != nil {
+		t.Fatal(err)
+	}
+	if restored, found, err := ledger.Get(ctx, key); err != nil || !found || !bytes.Equal(restored, second) {
+		t.Fatalf("restored checkpoint pointer = (%v, %v, %v)", restored, found, err)
 	}
 	versions, err := ledger.CheckpointVersions(ctx, key)
 	if err != nil {

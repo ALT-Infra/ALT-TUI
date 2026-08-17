@@ -1,26 +1,8 @@
 package orchestrator
 
-import (
-	"encoding/json"
-	"fmt"
-	"sort"
-	"unicode/utf8"
-
-	"altv1/internal/event"
-)
-
-const (
-	recentDelegationLimit   = 12
-	recentPeerTurnLimit     = 12
-	recentConversationLimit = 6
-	recentTraceLimit        = 16
-	recentInstructionLimit  = 12
-	resultVisibleLimit      = 12_000
-)
-
 type delegationView struct {
 	ID              string           `json:"id"`
-	MemberID        string           `json:"member_id"`
+	SpecialistID    string           `json:"specialist_id"`
 	Objective       string           `json:"objective"`
 	DependsOn       []string         `json:"depends_on,omitempty"`
 	Status          DelegationStatus `json:"status"`
@@ -58,78 +40,40 @@ type evidenceArchiveView struct {
 	Recall                string         `json:"recall"`
 }
 
-func leadEvidenceViews(state *Projection, signals []Signal) ([]delegationView, []peerTurnView, *evidenceArchiveView) {
-	protected := make(map[string]bool, len(signals))
-	for _, signal := range signals {
-		if signal.DelegationID != "" {
-			protected[signal.DelegationID] = true
-		}
-	}
-	archive := newEvidenceArchive()
+func agentEvidenceViews(state *Projection, signals []Signal) ([]delegationView, []peerTurnView, *evidenceArchiveView) {
+	// The provider-derived model compactor owns visibility bounds. Keeping a
+	// second count-based eviction policy here used to discard useful evidence
+	// after 12 entries regardless of whether the selected model had 8K or 1M
+	// tokens. Projection data is already backed by exact context references, so
+	// this layer supplies the complete structured state and lets the shared
+	// budget reduce the final model request when the current route requires it.
+	_ = signals
 	delegations := state.SortedDelegations()
-	delegationKeepFrom := max(0, len(delegations)-recentDelegationLimit)
 	var delegationViews []delegationView
-	for index, delegation := range delegations {
-		active := delegation.Status == DelegationPending || delegation.Status == DelegationRunning
-		if !active && index < delegationKeepFrom && !protected[delegation.Spec.ID] {
-			archive.add(delegation.Spec.MemberID, string(delegation.Status), firstPositive(delegation.SpecSequence, delegation.ResultSequence), max(delegation.SpecSequence, delegation.ResultSequence))
-			continue
-		}
-		result, compacted := compactReferencedText(delegation.Result, delegation.ResultReference, resultVisibleLimit)
+	for _, delegation := range delegations {
 		delegationViews = append(delegationViews, delegationView{
-			ID: delegation.Spec.ID, MemberID: delegation.Spec.MemberID,
-			Objective: compactPlainText(delegation.Spec.Objective, 4_000),
+			ID: delegation.Spec.ID, SpecialistID: delegation.Spec.SpecialistID,
+			Objective: delegation.Spec.Objective,
 			DependsOn: delegation.Spec.DependsOn, Status: delegation.Status,
-			Result: result, Findings: compactStringList(delegation.Findings, 6_000),
-			Risks: compactStringList(delegation.Risks, 4_000), Error: compactPlainText(delegation.Error, 2_000),
+			Result: delegation.Result, Findings: append([]string(nil), delegation.Findings...),
+			Risks: append([]string(nil), delegation.Risks...), Error: delegation.Error,
 			SpecReference: delegation.SpecReference, ResultReference: delegation.ResultReference,
-			Compacted: compacted,
 		})
 	}
 
 	peerTurns := state.SortedPeerTurns()
-	peerKeepFrom := max(0, len(peerTurns)-recentPeerTurnLimit)
 	var peerViews []peerTurnView
-	for index, turn := range peerTurns {
-		active := turn.Status == DelegationPending || turn.Status == DelegationRunning
-		if !active && index < peerKeepFrom && !protected[turn.Spec.ID] {
-			archive.add(turn.Spec.PeerID, string(turn.Status), firstPositive(turn.SpecSequence, turn.ResultSequence), max(turn.SpecSequence, turn.ResultSequence))
-			continue
-		}
-		result, compacted := compactReferencedText(turn.Result, turn.ResultReference, resultVisibleLimit)
+	for _, turn := range peerTurns {
 		peerViews = append(peerViews, peerTurnView{
 			ID: turn.Spec.ID, CollaborationID: turn.Spec.CollaborationID,
 			PeerID: turn.Spec.PeerID, Round: turn.Spec.Round,
-			Objective: compactPlainText(turn.Spec.Objective, 4_000), Status: turn.Status,
-			Result: result, Findings: compactStringList(turn.Findings, 6_000),
-			Risks: compactStringList(turn.Risks, 4_000), Error: compactPlainText(turn.Error, 2_000),
+			Objective: turn.Spec.Objective, Status: turn.Status,
+			Result: turn.Result, Findings: append([]string(nil), turn.Findings...),
+			Risks: append([]string(nil), turn.Risks...), Error: turn.Error,
 			SpecReference: turn.SpecReference, ResultReference: turn.ResultReference,
-			Compacted: compacted,
 		})
 	}
-	if archive.Omitted == 0 {
-		archive = nil
-	}
-	return delegationViews, peerViews, archive
-}
-
-func newEvidenceArchive() *evidenceArchiveView {
-	return &evidenceArchiveView{
-		ByAssignment: make(map[string]int), ByStatus: make(map[string]int),
-		Recall: "Use context_browse when you do not know the right terms, context_search to locate relevant evidence, then context_open on its exact reference. The canonical records were not summarized or discarded.",
-	}
-}
-
-func (v *evidenceArchiveView) add(assignment, status string, from, through int64) {
-	v.Omitted++
-	v.ByAssignment[assignment]++
-	v.ByStatus[status]++
-	if from > 0 && (v.SourceSequenceFrom == 0 || from < v.SourceSequenceFrom) {
-		v.SourceSequenceFrom = from
-	}
-	if through > v.SourceSequenceThrough {
-		v.SourceSequenceThrough = through
-	}
+	return delegationViews, peerViews, nil
 }
 
 type conversationHistoryView struct {
@@ -144,7 +88,7 @@ type conversationTurnView struct {
 	Answer          string                  `json:"answer,omitempty"`
 	AnswerReference string                  `json:"answer_reference,omitempty"`
 	Status          string                  `json:"status"`
-	LeadID          string                  `json:"lead_id,omitempty"`
+	LeaderID        string                  `json:"leader_id,omitempty"`
 	ObservableTrace []conversationTraceView `json:"observable_trace,omitempty"`
 }
 
@@ -164,20 +108,15 @@ type observableTraceView struct {
 }
 
 func boundedObservableTrace(trace []ConversationTrace, alreadyArchived int) observableTraceView {
-	start := max(0, len(trace)-recentTraceLimit)
-	view := observableTraceView{Archived: alreadyArchived + start}
+	view := observableTraceView{Archived: alreadyArchived}
 	if view.Archived > 0 {
 		view.Recall = "Earlier current-turn tool occurrences remain exact. Browse or search only if the recent delivered evidence is insufficient, then open the exact reference."
 	}
-	for _, item := range trace[start:] {
-		limit := 4_000
-		if item.Kind == event.ToolCompleted {
-			limit = resultVisibleLimit
-		}
+	for _, item := range trace {
 		view.Recent = append(view.Recent, conversationTraceView{
 			Reference: item.Reference, Sequence: item.Sequence, Kind: string(item.Kind),
 			Actor: item.Actor, CorrelationID: item.CorrelationID,
-			Data: compactPlainText(string(item.Data), limit),
+			Data: string(item.Data),
 		})
 	}
 	return view
@@ -195,18 +134,17 @@ type instructionHistoryView struct {
 }
 
 func boundedUserInstructions(values, references []string, alreadyArchived int) instructionHistoryView {
-	start := max(0, len(values)-recentInstructionLimit)
-	view := instructionHistoryView{Archived: alreadyArchived + start}
+	view := instructionHistoryView{Archived: alreadyArchived}
 	if view.Archived > 0 {
 		view.Recall = "Earlier user instructions remain exact in the conversation archive. Browse or search when one becomes relevant, then open its reference."
 	}
-	for index := start; index < len(values); index++ {
+	for index := range values {
 		reference := ""
 		if index < len(references) {
 			reference = references[index]
 		}
 		view.Recent = append(view.Recent, instructionView{
-			Text: compactPlainText(values[index], 8_000), Reference: reference,
+			Text: values[index], Reference: reference,
 		})
 	}
 	return view
@@ -222,101 +160,22 @@ func boundedConversationHistory(history []ConversationTurn) conversationHistoryV
 	if len(history) == 0 {
 		return conversationHistoryView{}
 	}
-	start := max(0, len(history)-recentConversationLimit)
 	view := conversationHistoryView{}
-	if start > 0 {
-		view.Archived = &conversationArchiveView{
-			OmittedTurns: start, ByStatus: make(map[string]int),
-			Recall: "Earlier conversation turns remain exact in ALT's context archive. Use context_browse, context_search, and context_open when their details become relevant.",
-		}
-		for _, turn := range history[:start] {
-			view.Archived.ByStatus[turn.Status]++
-		}
-	}
-	for _, turn := range history[start:] {
+	for _, turn := range history {
 		entry := conversationTurnView{
-			SessionID: turn.SessionID, Task: compactPlainText(turn.Task, 8_000),
+			SessionID: turn.SessionID, Task: turn.Task,
 			TaskReference:   turn.TaskReference,
-			Answer:          compactReferencedTextOnly(turn.Answer, turn.AnswerReference, 12_000),
-			AnswerReference: turn.AnswerReference, Status: turn.Status, LeadID: turn.LeadID,
+			Answer:          turn.Answer,
+			AnswerReference: turn.AnswerReference, Status: turn.Status, LeaderID: turn.LeaderID,
 		}
-		traceStart := max(0, len(turn.ObservableTrace)-recentTraceLimit)
-		for _, trace := range turn.ObservableTrace[traceStart:] {
+		for _, trace := range turn.ObservableTrace {
 			entry.ObservableTrace = append(entry.ObservableTrace, conversationTraceView{
 				Reference: trace.Reference, Sequence: trace.Sequence, Kind: string(trace.Kind),
 				Actor: trace.Actor, CorrelationID: trace.CorrelationID,
-				Data: compactPlainText(string(trace.Data), 2_000),
+				Data: string(trace.Data),
 			})
 		}
 		view.Recent = append(view.Recent, entry)
 	}
 	return view
-}
-
-func compactReferencedText(value, reference string, limit int) (string, bool) {
-	if len(value) <= limit {
-		return value, false
-	}
-	return compactPlainText(value, limit) + fmt.Sprintf("\n[Exact occurrence: %s]", reference), true
-}
-
-func compactReferencedTextOnly(value, reference string, limit int) string {
-	result, _ := compactReferencedText(value, reference, limit)
-	return result
-}
-
-func compactPlainText(value string, limit int) string {
-	if limit <= 0 || len(value) <= limit {
-		return value
-	}
-	head := limit * 2 / 3
-	tail := limit - head
-	for head > 0 && head < len(value) && !utf8.RuneStart(value[head]) {
-		head--
-	}
-	start := len(value) - tail
-	for start < len(value) && !utf8.RuneStart(value[start]) {
-		start++
-	}
-	return value[:head] + fmt.Sprintf("\n… [%d bytes omitted from this working view] …\n", start-head) + value[start:]
-}
-
-func compactStringList(values []string, limit int) []string {
-	if len(values) == 0 {
-		return nil
-	}
-	copy := append([]string(nil), values...)
-	remaining := limit
-	for index, value := range copy {
-		if remaining <= 0 {
-			return append(copy[:index], fmt.Sprintf("… %d additional entries remain in the exact referenced record", len(copy)-index))
-		}
-		copy[index] = compactPlainText(value, min(remaining, 2_000))
-		remaining -= len(copy[index])
-	}
-	return copy
-}
-
-func firstPositive(values ...int64) int64 {
-	result := int64(0)
-	for _, value := range values {
-		if value > 0 && (result == 0 || value < result) {
-			result = value
-		}
-	}
-	return result
-}
-
-func estimatedTokensJSON(value any) int {
-	encoded, _ := json.Marshal(value)
-	return (len(encoded) + 3) / 4
-}
-
-func sortedCountKeys(values map[string]int) []string {
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
 }

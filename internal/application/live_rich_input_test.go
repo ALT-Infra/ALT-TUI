@@ -18,33 +18,44 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-const liveRichInputTeam = `
-schema: 1
-id: live-rich-input
+const liveSpecialistTeam = `
+schema: 2
+id: live-visual-specialist
 revision: 1
-name: Live Rich Input Verification
+name: Blind coder with stateless visual inspection
 gateway: opencode
 models:
-  router-model: {route: zen, name: nemotron-3.5-lightning-free}
-  accountable-text-model: {route: zen, name: deepseek-v4-flash-free}
-  alternate-model: {route: zen, name: hy3-free}
+  code-model: {route: zen, name: deepseek-v4-flash-free}
   visual-model: {route: zen, name: mimo-v2.5-free}
-router:
-  model: router-model
-  definition: Route requests whose outcome depends on interpreting supplied visual evidence to accountable-lead; route unrelated requests to alternate-lead.
-leads:
-  - id: accountable-lead
-    model: accountable-text-model
-    definition: Own answers that require visual evidence, coordinating a visual analyst when the request explicitly asks for independent analysis.
-    calls: [visual-analyst]
-    peers: [visual-analyst]
-  - id: alternate-lead
-    model: alternate-model
-    definition: Own requests unrelated to interpreting supplied visual evidence.
-members:
+primary:
+  id: deepseek-coder
+  model: code-model
+  definition: Own implementation end to end. When required evidence exists only in attached pixels, call visual-inspector with a self-contained question and the exact attachment, then continue the code task yourself.
+  specialists: [visual-inspector]
+specialists:
+  - id: visual-inspector
+    model: visual-model
+    definition: Begin from a clean slate, inspect only media explicitly attached to this invocation, and return precise observable evidence to the caller without owning the broader task.
+`
+
+const liveVisualPeerTeam = `
+schema: 2
+id: live-visual-peer
+revision: 1
+name: Multimodal analysis handoff
+gateway: opencode
+models:
+  entry-model: {route: zen, name: hy3-free}
+  visual-model: {route: zen, name: mimo-v2.5-free}
+primary:
+  id: entry
+  model: entry-model
+  definition: This is the entry point for every user turn. Hand leadership to visual-analyst when the user's requested end result is interpretation of attached visual material; otherwise own the result.
+  peers: [visual-analyst]
+peers:
   - id: visual-analyst
     model: visual-model
-    definition: Inspect supplied images precisely and report only observable visual evidence, separating legible labels from inference.
+    definition: Own end-to-end requests whose requested result is visual analysis. Inspect the original attached media, separate legible content and observable structure from inference, and answer the user directly.
 `
 
 func TestLiveOpenCodeImageDelegationAndPeerTransfer(t *testing.T) {
@@ -65,31 +76,36 @@ func TestLiveOpenCodeImageDelegationAndPeerTransfer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	document, err := profile.Parse([]byte(liveRichInputTeam))
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	for _, scenario := range []struct {
-		name      string
-		request   string
-		eventKind event.Kind
+		name       string
+		team       string
+		request    string
+		eventKind  event.Kind
+		finalActor string
 	}{
 		{
-			name:      "stateless specialist",
-			request:   "Delegate this image to visual-analyst as a stateless call. Then give me a concise account of the architecture diagram based on that independent report.",
-			eventKind: event.DelegationCreated,
+			name:       "stateless specialist",
+			team:       liveSpecialistTeam,
+			request:    "Use visual-inspector as a stateless specialist to read this architecture diagram, then give me a concise implementation-oriented account based on its report.",
+			eventKind:  event.DelegationCreated,
+			finalActor: "deepseek-coder",
 		},
 		{
-			name:      "stateful peer",
-			request:   "Open a stateful peer collaboration with visual-analyst, send it this image, and then give me a concise account of the architecture diagram based on the peer's report.",
-			eventKind: event.PeerTurnCreated,
+			name:       "peer leadership handoff",
+			team:       liveVisualPeerTeam,
+			request:    "This request's end result is visual analysis. Hand leadership to visual-analyst, which should inspect this architecture diagram and answer me directly with a concise account.",
+			eventKind:  event.LeadershipTransferred,
+			finalActor: "visual-analyst",
 		},
 	} {
 		if requestedScenario != "" && requestedScenario != scenario.name {
 			continue
 		}
 		t.Run(scenario.name, func(t *testing.T) {
+			document, err := profile.Parse([]byte(scenario.team))
+			if err != nil {
+				t.Fatal(err)
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 			defer cancel()
 			scenarioDir, err := os.MkdirTemp(dataDir, strings.ReplaceAll(scenario.name, " ", "-")+"-")
@@ -130,25 +146,33 @@ func TestLiveOpenCodeImageDelegationAndPeerTransfer(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			transferred := false
+			authorityObserved := false
 			answer := ""
+			finalActor := ""
 			for _, item := range items {
 				if item.Kind == scenario.eventKind {
 					if item.Kind == event.DelegationCreated {
 						spec, decodeErr := event.Decode[event.DelegationSpec](item)
-						transferred = decodeErr == nil && len(spec.Attachments) == 1 && spec.Attachments[0] == artifact.Reference
+						authorityObserved = decodeErr == nil && spec.CallerID == "deepseek-coder" && spec.SpecialistID == "visual-inspector" && len(spec.Attachments) == 1 && spec.Attachments[0] == artifact.Reference
 					} else {
-						spec, decodeErr := event.Decode[event.PeerTurnSpec](item)
-						transferred = decodeErr == nil && len(spec.Attachments) == 1 && spec.Attachments[0] == artifact.Reference
+						transfer, decodeErr := event.Decode[event.LeadershipTransferredData](item)
+						authorityObserved = decodeErr == nil && transfer.FromAgentID == "entry" && transfer.ToAgentID == "visual-analyst"
 					}
 				}
 				if item.Kind == event.FinalCompleted {
 					final, _ := event.Decode[event.FinalCompletedData](item)
 					answer = final.Answer
+					finalActor = item.Actor
 				}
 			}
-			if !transferred {
-				t.Fatal("Lead did not transfer the immutable image reference through the requested authorized edge")
+			if !authorityObserved {
+				for _, item := range items {
+					t.Logf("%03d %-28s actor=%s data=%s", item.Sequence, item.Kind, item.Actor, item.Data)
+				}
+				t.Fatal("the requested specialist call or leadership transfer was not recorded on its authorized edge")
+			}
+			if finalActor != scenario.finalActor {
+				t.Fatalf("final answer actor = %q, want %q", finalActor, scenario.finalActor)
 			}
 			if strings.TrimSpace(answer) == "" || !strings.Contains(strings.ToLower(answer), expectedEvidence) {
 				t.Fatalf("final answer lacks expected visual evidence %q: %q", expectedEvidence, answer)

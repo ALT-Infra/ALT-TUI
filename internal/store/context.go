@@ -192,7 +192,7 @@ func ParseContextReference(raw string) (string, error) {
 }
 
 // ContextRecordID validates an ALT context reference and returns its stable
-// occurrence ID. It is useful when a Lead explicitly grants a record to an
+// occurrence ID. It is useful when a leader explicitly grants a record to an
 // otherwise isolated assignment.
 func ContextRecordID(reference string) (string, error) {
 	return ParseContextReference(reference)

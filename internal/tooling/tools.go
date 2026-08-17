@@ -2,11 +2,13 @@ package tooling
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
+	"altv1/internal/provider"
+
 	"github.com/cloudwego/eino/adk"
-	"github.com/cloudwego/eino/adk/middlewares/dynamictool/toolsearch"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	toolutils "github.com/cloudwego/eino/components/tool/utils"
@@ -69,7 +71,7 @@ type ContextBrowseResult struct {
 type ContextOpenInput struct {
 	Reference  string `json:"reference" jsonschema:"description=An exact alt://context/records/... or alt-tool-output://... reference returned by ALT."`
 	ByteOffset int    `json:"byte_offset,omitempty" jsonschema:"description=Zero-based byte offset from which to read; use next_byte_offset to continue an earlier response."`
-	MaxBytes   int    `json:"max_bytes,omitempty" jsonschema:"description=Maximum exact bytes to return; defaults to 16000 and cannot exceed 64000."`
+	MaxBytes   int    `json:"max_bytes,omitempty" jsonschema:"description=Optional caller-requested byte ceiling. ALT may return a smaller page derived from the selected model's live context envelope."`
 }
 
 type ContextOpenResult struct {
@@ -96,14 +98,17 @@ func ToolNames() []string {
 	return append([]string(nil), allRuntimeTools...)
 }
 
-// Handlers gives every assignment the complete runtime tool catalogue through
-// Eino's dynamic ToolSearch middleware. Process sessions remain scoped to
-// owner, so concurrent assignments cannot write to or poll each other's PTYs.
+// Handlers gives every assignment one stable runtime tool catalogue. The
+// catalogue is intentionally small enough to expose directly: interposing a
+// model-driven discovery call would add a round trip before ordinary work and
+// mutate the cache-bearing tool header between model calls. Process sessions
+// remain scoped to owner, so concurrent assignments cannot write to or poll
+// each other's PTYs.
 func (r *Runtime) Handlers(
 	ctx context.Context,
 	owner string,
 ) ([]adk.ChatModelAgentMiddleware, error) {
-	return r.handlers(ctx, owner, nil)
+	return r.handlers(ctx, owner, nil, provider.ModelLimits{})
 }
 
 // HandlersWithCompaction adds Eino's intra-agent summarization after ALT's
@@ -113,14 +118,50 @@ func (r *Runtime) HandlersWithCompaction(
 	ctx context.Context,
 	owner string,
 	summarizer model.BaseChatModel,
+	limits ...provider.ModelLimits,
 ) ([]adk.ChatModelAgentMiddleware, error) {
-	return r.handlers(ctx, owner, summarizer)
+	var resolved provider.ModelLimits
+	if len(limits) > 0 {
+		resolved = limits[0]
+	}
+	return r.handlers(ctx, owner, summarizer, resolved)
+}
+
+// CompactionHandlers installs the same provider-derived context recovery used
+// by tool-capable agents without advertising any tools. Models whose
+// authenticated catalog explicitly rejects tool calling still need overflow
+// recovery and lifecycle accounting; tool capability and context capacity are
+// independent facts.
+func (r *Runtime) CompactionHandlers(
+	ctx context.Context,
+	owner string,
+	summarizer model.BaseChatModel,
+	limits provider.ModelLimits,
+) ([]adk.ChatModelAgentMiddleware, error) {
+	if r == nil {
+		return nil, fmt.Errorf("tool runtime is required")
+	}
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		return nil, fmt.Errorf("context owner is required")
+	}
+	budget := newContextBudget(limits)
+	r.setContextBudget(owner, budget)
+	compactor, err := r.contextCompactionHandler(ctx, owner, summarizer, budget)
+	if err != nil {
+		return nil, fmt.Errorf("create Eino context compaction: %w", err)
+	}
+	if compactor == nil {
+		return nil, nil
+	}
+	return []adk.ChatModelAgentMiddleware{compactor}, nil
 }
 
 func (r *Runtime) handlers(
 	ctx context.Context,
 	owner string,
 	summarizer model.BaseChatModel,
+	limits provider.ModelLimits,
 ) ([]adk.ChatModelAgentMiddleware, error) {
 	if r == nil {
 		return nil, fmt.Errorf("tool runtime is required")
@@ -134,7 +175,9 @@ func (r *Runtime) handlers(
 		enabled[name] = true
 	}
 
-	filesystemTools, filesystemInstruction, reducer, err := r.filesystemTools(ctx, owner)
+	budget := newContextBudget(limits)
+	r.setContextBudget(owner, budget)
+	filesystemTools, filesystemInstruction, reducer, err := r.filesystemTools(ctx, owner, budget)
 	if err != nil {
 		return nil, err
 	}
@@ -142,21 +185,17 @@ func (r *Runtime) handlers(
 	if err != nil {
 		return nil, err
 	}
-	deferred := append([]tool.BaseTool(nil), filesystemTools...)
-	deferred = append(deferred, nativeTools...)
-	dynamic, err := toolsearch.New(ctx, &toolsearch.Config{DynamicTools: deferred})
-	if err != nil {
-		return nil, fmt.Errorf("create Eino dynamic tool search: %w", err)
-	}
+	runtimeTools := append([]tool.BaseTool(nil), filesystemTools...)
+	runtimeTools = append(runtimeTools, nativeTools...)
 	handlers := []adk.ChatModelAgentMiddleware{
 		&toolMiddleware{
 			BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
 			instruction:                  filesystemInstruction,
+			tools:                        runtimeTools,
 		},
-		dynamic,
 		reducer,
 	}
-	compactor, err := r.contextCompactionHandler(ctx, owner, summarizer)
+	compactor, err := r.contextCompactionHandler(ctx, owner, summarizer, budget)
 	if err != nil {
 		return nil, fmt.Errorf("create Eino context compaction: %w", err)
 	}
@@ -170,7 +209,8 @@ func (r *Runtime) handlers(
 		}
 		handlers[0] = &toolMiddleware{
 			BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
-			instruction:                  filesystemInstruction + "\n" + executionPolicy + " Running commands return a numeric session_id for write_stdin; copy that exact ID when polling or sending input. An unknown-process lookup does not prove that the process ended: if the ID was transcribed incorrectly, retry with the exact session_id from the latest running result. apply_patch accepts strict Git or standard unified text patches and validates every path against the workspace before changing files. Discover runtime tools with tool_search as the work requires them. web_search discovers sources, web_fetch retrieves exact source content, and web_answer supplies an independent cited synthesis. Search output and generated answers are not substitutes for checking decisive claims against fetched primary evidence. Credentials are never exposed to shell commands.",
+			instruction:                  filesystemInstruction + "\n" + executionPolicy + " Running commands return a numeric session_id for write_stdin; copy that exact ID when polling or sending input. An unknown-process lookup does not prove that the process ended: if the ID was transcribed incorrectly, retry with the exact session_id from the latest running result. apply_patch accepts strict Git or standard unified text patches and validates every path against the workspace before changing files. Runtime tools are directly available; call the one required by the work without a discovery step. web_search discovers sources, web_fetch retrieves exact source content, and web_answer supplies an independent cited synthesis. Search output and generated answers are not substitutes for checking decisive claims against fetched primary evidence. Credentials are never exposed to shell commands.",
+			tools:                        runtimeTools,
 		}
 	}
 	return handlers, nil
@@ -181,7 +221,7 @@ func (r *Runtime) nativeTools(ctx context.Context, owner string, enabled map[str
 	if enabled[ToolNameExecCommand] {
 		value, err := toolutils.InferTool(
 			ToolNameExecCommand,
-			"Execute a shell command in the session workspace. Returns output and an exit code, or a session_id when still running.",
+			"Execute a shell command in the session workspace. A session_id is returned while the process is running or when completed output has_more pages; drain exact remaining pages with write_stdin.",
 			func(ctx context.Context, input ExecCommandInput) (ProcessResult, error) {
 				return r.processes.start(ctx, owner, input)
 			},
@@ -194,7 +234,7 @@ func (r *Runtime) nativeTools(ctx context.Context, owner string, enabled map[str
 	if enabled[ToolNameWriteStdin] {
 		value, err := toolutils.InferTool(
 			ToolNameWriteStdin,
-			"Write exact characters to, or poll, a running exec_command session owned by this assignment.",
+			"Write exact characters to, poll, or drain has_more output pages from an exec_command session owned by this assignment.",
 			func(ctx context.Context, input WriteStdinInput) (ProcessResult, error) {
 				return r.processes.write(ctx, owner, input)
 			},
@@ -271,13 +311,10 @@ func (r *Runtime) nativeTools(ctx context.Context, owner string, enabled map[str
 				if input.ByteOffset < 0 {
 					return ContextOpenResult{}, fmt.Errorf("context open byte_offset cannot be negative")
 				}
-				if input.MaxBytes == 0 {
-					input.MaxBytes = 16_000
+				if input.MaxBytes < 0 {
+					return ContextOpenResult{}, fmt.Errorf("context open max_bytes cannot be negative")
 				}
-				if input.MaxBytes < 1 || input.MaxBytes > 64_000 {
-					return ContextOpenResult{}, fmt.Errorf("context open max_bytes must be within [1,64000]")
-				}
-				return r.options.OpenContext(ctx, owner, input)
+				return r.openContextForModel(ctx, owner, input)
 			},
 		)
 		if err != nil {
@@ -326,6 +363,62 @@ func (r *Runtime) nativeTools(ctx context.Context, owner string, enabled map[str
 		return r.appendLinkupTools(enabled, tools)
 	}
 	return tools, nil
+}
+
+func (r *Runtime) openContextForModel(
+	ctx context.Context,
+	owner string,
+	input ContextOpenInput,
+) (ContextOpenResult, error) {
+	available, known := r.modelVisibleResultBytes(owner)
+	requested := input.MaxBytes
+	if known && (requested == 0 || requested > available) {
+		requested = available
+	}
+	if known && requested <= 0 {
+		return ContextOpenResult{}, fmt.Errorf("the current model envelope has no safe room for an exact context page; allow ALT to compact the working trajectory and retry")
+	}
+	input.MaxBytes = requested
+	result, err := r.options.OpenContext(ctx, owner, input)
+	if err != nil || !known {
+		return result, err
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return ContextOpenResult{}, fmt.Errorf("measure exact context page: %w", err)
+	}
+	if len(encoded) <= available {
+		return result, nil
+	}
+
+	// Metadata and base64 expansion vary by occurrence. Binary-search the
+	// actual serialized response rather than subtracting a guessed header or
+	// assuming a chars-per-token ratio.
+	low, high := 1, requested
+	var best ContextOpenResult
+	for low <= high {
+		candidateBytes := low + (high-low)/2
+		candidateInput := input
+		candidateInput.MaxBytes = candidateBytes
+		candidate, candidateErr := r.options.OpenContext(ctx, owner, candidateInput)
+		if candidateErr != nil {
+			return ContextOpenResult{}, candidateErr
+		}
+		wire, marshalErr := json.Marshal(candidate)
+		if marshalErr != nil {
+			return ContextOpenResult{}, fmt.Errorf("measure exact context page: %w", marshalErr)
+		}
+		if len(wire) <= available && candidate.ByteEnd > candidate.ByteStart {
+			best = candidate
+			low = candidateBytes + 1
+		} else {
+			high = candidateBytes - 1
+		}
+	}
+	if best.ByteEnd <= best.ByteStart {
+		return ContextOpenResult{}, fmt.Errorf("the current model envelope cannot hold even the smallest exact context page and its provenance")
+	}
+	return best, nil
 }
 
 type unavailableResearchInput struct {

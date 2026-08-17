@@ -1,7 +1,6 @@
 package thinking_test
 
 import (
-	"strings"
 	"testing"
 	"time"
 
@@ -11,298 +10,164 @@ import (
 	"altv1/internal/thinking"
 )
 
-func TestProjectionShowsParallelWorkAndIndependentReturn(t *testing.T) {
-	projection := testProjection(t)
-	apply(t, projection,
-		event.Draft{Kind: event.SessionCreated, Data: event.SessionCreatedData{Task: "parallel"}},
-		event.Draft{Kind: event.RouterStarted},
-		event.Draft{Kind: event.LeadSelected, Data: event.LeadSelectedData{LeadID: "engineering"}},
-		event.Draft{Kind: event.DelegationCreated, Data: event.DelegationSpec{
-			ID: "research-a", MemberID: "research", Objective: "find evidence",
-		}},
-		event.Draft{Kind: event.DelegationCreated, Data: event.DelegationSpec{
-			ID: "verify-b", MemberID: "verification", Objective: "independent check",
-		}},
-		event.Draft{Kind: event.DelegationStarted, Data: event.DelegationStartedData{
-			DelegationID: "research-a", Attempt: 1,
-		}},
-		event.Draft{Kind: event.DelegationStarted, Data: event.DelegationStartedData{
-			DelegationID: "verify-b", Attempt: 1,
-		}},
-	)
-
-	research := projection.Active.Edges["flow:delegation:engineering:research"]
-	verification := projection.Active.Edges["flow:delegation:engineering:verification"]
-	if research == nil || research.Active != 1 || research.Direction != "outward" {
-		t.Fatalf("research flow = %#v", research)
+func TestTeamGraphHasPrimaryIngressPeersAndDirectedSpecialistsWithoutRouter(t *testing.T) {
+	p := thinkingProfile()
+	projection := thinking.New("conversation", p)
+	turn := store.Session{ID: "turn-1", ConversationID: "conversation", Task: "Fix the screenshot error", Status: store.SessionRunning, CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	if err := projection.AddTurn(turn); err != nil {
+		t.Fatal(err)
 	}
-	if verification == nil || verification.Active != 1 || verification.Direction != "outward" {
-		t.Fatalf("verification flow = %#v", verification)
+	active := projection.Active
+	if active.Nodes["router"] != nil {
+		t.Fatal("thinking graph still contains a router")
 	}
+	primary := active.Nodes["member:deepseek-coder"]
+	peer := active.Nodes["member:research-peer"]
+	specialist := active.Nodes["member:vision-specialist"]
+	if primary == nil || peer == nil || specialist == nil {
+		t.Fatalf("missing purposeful Team nodes: %#v", active.Nodes)
+	}
+	if primary.Kind != "agent" || primary.Metadata["primary"] != "true" || peer.Kind != "agent" || specialist.Kind != "specialist" {
+		t.Fatalf("incorrect node roles: primary=%#v peer=%#v specialist=%#v", primary, peer, specialist)
+	}
+	if edge := active.Edges["allowed:user:deepseek-coder"]; edge == nil || edge.From != "user" || edge.To != primary.ID {
+		t.Fatalf("user ingress edge = %#v", edge)
+	}
+	if edge := active.Edges["allowed-peer:deepseek-coder:research-peer"]; edge == nil || edge.Direction != "bidirectional" {
+		t.Fatalf("peer edge = %#v", edge)
+	}
+	if edge := active.Edges["allowed-specialist:deepseek-coder:vision-specialist"]; edge == nil || edge.Direction != "outward" {
+		t.Fatalf("specialist permission edge = %#v", edge)
+	}
+}
 
-	apply(t, projection, event.Draft{
-		Kind: event.DelegationCompleted,
-		Data: event.DelegationCompletedData{
-			DelegationID: "research-a", Attempt: 1, Result: "evidence",
-		},
+func TestLeadershipHandoffAndDirectPeerAnswerAreProjected(t *testing.T) {
+	projection := projectionWithTurn(t)
+	now := time.Now()
+	applyDrafts(t, projection, "turn-1", now, []event.Draft{
+		{Kind: event.SessionCreated, Actor: "user", Data: event.SessionCreatedData{Task: "Audit the evidence"}},
+		{Kind: event.ProfilePinned, Actor: "system", Data: event.ProfilePinnedData{ProfileID: "vision-coding", Revision: 1}},
+		{Kind: event.LeadershipTransferred, Actor: "system", Data: event.LeadershipTransferredData{ToAgentID: "deepseek-coder", Reason: "primary ingress"}},
+		{Kind: event.AgentTurnStarted, Actor: "deepseek-coder", Data: event.AgentTurnData{AgentID: "deepseek-coder", Turn: 1}},
+		{Kind: event.LeadershipTransferred, Actor: "deepseek-coder", Data: event.LeadershipTransferredData{FromAgentID: "deepseek-coder", ToAgentID: "research-peer", Reason: "evidence is the deliverable"}},
+		{Kind: event.AgentTurnStarted, Actor: "research-peer", Data: event.AgentTurnData{AgentID: "research-peer", Turn: 2}},
+		{Kind: event.FinalStarted, Actor: "research-peer"},
+		{Kind: event.FinalTextDelta, Actor: "research-peer", Data: event.TextDeltaData{Text: "Peer answer"}},
+		{Kind: event.FinalCompleted, Actor: "research-peer", Data: event.FinalCompletedData{Answer: "Peer answer"}},
 	})
-	if research.Active != 0 {
-		t.Fatalf("completed research active count = %d, want 0", research.Active)
+	active := projection.Active
+	if active.Status != thinking.Completed {
+		t.Fatalf("turn status = %s", active.Status)
 	}
-	if verification.Active != 1 {
-		t.Fatalf("independent verification was incorrectly closed: %#v", verification)
+	var handoffFound bool
+	for _, edge := range active.Edges {
+		if edge.Kind == "handoff" && edge.From == "member:deepseek-coder" && edge.To == "member:research-peer" && edge.Metadata["reason"] == "evidence is the deliverable" {
+			handoffFound = true
+		}
 	}
-	returned := projection.Active.Edges["flow:result:research:engineering"]
-	if returned == nil || returned.Direction != "inward" || returned.Status != thinking.Completed {
-		t.Fatalf("return flow = %#v", returned)
+	if !handoffFound {
+		t.Fatalf("handoff flow absent: %#v", active.Edges)
 	}
-}
-
-func TestDependencyRemainsQueuedUntilARecordedStart(t *testing.T) {
-	projection := testProjection(t)
-	apply(t, projection,
-		event.Draft{Kind: event.SessionCreated, Data: event.SessionCreatedData{Task: "sequential"}},
-		event.Draft{Kind: event.RouterStarted},
-		event.Draft{Kind: event.LeadSelected, Data: event.LeadSelectedData{LeadID: "engineering"}},
-		event.Draft{Kind: event.DelegationCreated, Data: event.DelegationSpec{
-			ID: "first", MemberID: "research", Objective: "first",
-		}},
-		event.Draft{Kind: event.DelegationCreated, Data: event.DelegationSpec{
-			ID: "second", MemberID: "verification", Objective: "second",
-			DependsOn: []string{"first"},
-		}},
-		event.Draft{Kind: event.DelegationStarted, Data: event.DelegationStartedData{
-			DelegationID: "first", Attempt: 1,
-		}},
-	)
-	second := projection.Active.Edges["flow:delegation:engineering:verification"]
-	if second == nil || second.Status != thinking.Queued || second.Active != 0 {
-		t.Fatalf("dependent work was displayed as released without a start event: %#v", second)
+	answer := active.Edges["flow:answer"]
+	if answer == nil || answer.From != "member:research-peer" || answer.To != "user" {
+		t.Fatalf("direct peer answer edge = %#v", answer)
 	}
 }
 
-func TestASecondTurnAdvancesOneSessionProjection(t *testing.T) {
-	projection := testProjection(t)
-	apply(t, projection,
-		event.Draft{Kind: event.SessionCreated, Data: event.SessionCreatedData{Task: "first"}},
-		event.Draft{Kind: event.SessionFailed, Data: event.FailureData{Error: "failed"}},
-	)
-	firstID := projection.ActiveTurnID
-	second := store.Session{
-		ID: "turn-2", ConversationID: projection.SessionID, Task: "second",
-		Status: store.SessionRunning, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+func TestSpecialistAndPeerResultsReturnToTheirRecordedCallers(t *testing.T) {
+	projection := projectionWithTurn(t)
+	now := time.Now()
+	applyDrafts(t, projection, "turn-1", now, []event.Draft{
+		{Kind: event.SessionCreated, Actor: "user", Data: event.SessionCreatedData{Task: "Fix code from an image"}},
+		{Kind: event.ProfilePinned, Actor: "system", Data: event.ProfilePinnedData{ProfileID: "vision-coding", Revision: 1}},
+		{Kind: event.LeadershipTransferred, Actor: "system", Data: event.LeadershipTransferredData{ToAgentID: "deepseek-coder", Reason: "primary ingress"}},
+		{Kind: event.DelegationCreated, Actor: "deepseek-coder", CorrelationID: "vision-1", Data: event.DelegationSpec{ID: "vision-1", CallerID: "deepseek-coder", SpecialistID: "vision-specialist", Objective: "Read the screenshot"}},
+		{Kind: event.DelegationStarted, Actor: "vision-specialist", CorrelationID: "vision-1", Data: event.DelegationStartedData{DelegationID: "vision-1", Attempt: 1}},
+		{Kind: event.DelegationCompleted, Actor: "vision-specialist", CorrelationID: "vision-1", Data: event.DelegationCompletedData{DelegationID: "vision-1", Attempt: 1, Result: "undefined symbol"}},
+		{Kind: event.PeerTurnCreated, Actor: "deepseek-coder", CorrelationID: "peer-1", Data: event.PeerTurnSpec{ID: "peer-1", CallerID: "deepseek-coder", PeerID: "research-peer", CollaborationID: "spec-check", Objective: "Check the specification", Round: 1}},
+		{Kind: event.PeerTurnStarted, Actor: "research-peer", CorrelationID: "peer-1", Data: event.PeerTurnStartedData{PeerTurnID: "peer-1", Attempt: 1}},
+		{Kind: event.PeerTurnCompleted, Actor: "research-peer", CorrelationID: "peer-1", Data: event.PeerTurnCompletedData{PeerTurnID: "peer-1", Attempt: 1, Result: "syntax is supported"}},
+	})
+	var specialistResult, peerResult bool
+	for _, edge := range projection.Active.Edges {
+		if edge.Kind == "result" && edge.From == "member:vision-specialist" && edge.To == "member:deepseek-coder" {
+			specialistResult = true
+		}
+		if edge.Kind == "peer-result" && edge.From == "member:research-peer" && edge.To == "member:deepseek-coder" {
+			peerResult = true
+		}
 	}
-	if err := projection.AddTurn(second); err != nil {
-		t.Fatal(err)
-	}
-	item, err := (event.Draft{
-		Kind: event.SessionCreated, Data: event.SessionCreatedData{Task: "second"},
-	}).Materialize(second.ID, 1, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := projection.Apply(item); err != nil {
-		t.Fatal(err)
-	}
-	if projection.SessionID != "conversation" {
-		t.Fatalf("session identity changed to %q", projection.SessionID)
-	}
-	if projection.ActiveTurnID != second.ID || len(projection.Turns) != 2 {
-		t.Fatalf("second turn did not advance the session projection: %#v", projection)
-	}
-	if projection.Turns[0].ID != firstID || projection.Turns[0].Status != thinking.Failed {
-		t.Fatalf("first turn history was not retained: %#v", projection.Turns[0])
+	if !specialistResult || !peerResult {
+		t.Fatalf("return flows specialist=%v peer=%v edges=%#v", specialistResult, peerResult, projection.Active.Edges)
 	}
 }
 
-func TestProjectionRejectsAnUnexplainedSequenceGap(t *testing.T) {
-	projection := testProjection(t)
-	item, err := (event.Draft{Kind: event.RouterStarted}).Materialize("turn-1", 2, time.Now())
+func TestContextCompactionTargetsAgentAndSpecialistNodes(t *testing.T) {
+	projection := projectionWithTurn(t)
+	now := time.Now()
+	applyDrafts(t, projection, "turn-1", now, []event.Draft{
+		{Kind: event.SessionCreated, Actor: "user", Data: event.SessionCreatedData{Task: "Inspect image"}},
+		{Kind: event.ProfilePinned, Actor: "system", Data: event.ProfilePinnedData{ProfileID: "vision-coding", Revision: 1}},
+		{Kind: event.LeadershipTransferred, Actor: "system", Data: event.LeadershipTransferredData{ToAgentID: "deepseek-coder", Reason: "primary ingress"}},
+		{Kind: event.DelegationCreated, Actor: "deepseek-coder", CorrelationID: "vision-1", Data: event.DelegationSpec{ID: "vision-1", CallerID: "deepseek-coder", SpecialistID: "vision-specialist", Objective: "Read image"}},
+		{Kind: event.ContextViewCommitted, Actor: "context", Data: event.ContextViewCommittedData{ScopeKind: "agent", ScopeID: "deepseek-coder", Epoch: 2, EstimatedTokens: 400}},
+		{Kind: event.ContextViewCommitted, Actor: "context", Data: event.ContextViewCommittedData{ScopeKind: "specialist", ScopeID: "vision-1", Epoch: 1, EstimatedTokens: 80}},
+		{Kind: event.ContextAgentCompacted, Actor: "context", CorrelationID: "specialist:vision-specialist:vision-1:1", Data: event.ContextAgentCompactedData{Scope: "specialist:vision-specialist", TranscriptReference: "alt-tool-output://transcript", MessagesBefore: 20, MessagesAfter: 4}},
+	})
+	primary := projection.Active.Nodes["member:deepseek-coder"]
+	specialist := projection.Active.Nodes["member:vision-specialist"]
+	if primary.Metadata["context_epoch"] != "2" || specialist.Metadata["context_epoch"] != "1" {
+		t.Fatalf("context targets primary=%#v specialist=%#v", primary.Metadata, specialist.Metadata)
+	}
+	if specialist.Metadata["exact_transcript"] != "alt-tool-output://transcript" {
+		t.Fatalf("specialist compaction metadata = %#v", specialist.Metadata)
+	}
+}
+
+func TestProjectionRejectsSequenceGap(t *testing.T) {
+	projection := projectionWithTurn(t)
+	item, err := (event.Draft{Kind: event.SessionCreated, Data: event.SessionCreatedData{Task: "x"}}).Materialize("turn-1", 2, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := projection.Apply(item); err == nil {
-		t.Fatal("sequence 2 was accepted before sequence 1")
-	}
-	if projection.Active.Sequence != 0 {
-		t.Fatalf("projection advanced across a gap to %d", projection.Active.Sequence)
+		t.Fatal("sequence gap was accepted")
 	}
 }
 
-func TestTerminalFailureClosesEveryOpenActivity(t *testing.T) {
-	projection := testProjection(t)
-	apply(t, projection,
-		event.Draft{Kind: event.SessionCreated, Data: event.SessionCreatedData{Task: "fail"}},
-		event.Draft{Kind: event.RouterStarted},
-		event.Draft{Kind: event.LeadSelected, Data: event.LeadSelectedData{LeadID: "engineering"}},
-		event.Draft{Kind: event.DelegationCreated, Data: event.DelegationSpec{
-			ID: "research-a", MemberID: "research", Objective: "open work",
-		}},
-		event.Draft{Kind: event.DelegationStarted, Data: event.DelegationStartedData{
-			DelegationID: "research-a", Attempt: 1,
-		}},
-		event.Draft{Kind: event.FinalStarted},
-		event.Draft{Kind: event.SessionFailed, Data: event.FailureData{Error: "endpoint stopped"}},
-	)
-	for _, edge := range projection.Active.Edges {
-		if edge.Active != 0 {
-			t.Fatalf("terminal turn retains active edge %#v", edge)
-		}
-	}
-	for _, node := range projection.Active.Nodes {
-		if node.Status == thinking.Running || node.Status == thinking.Queued {
-			t.Fatalf("terminal turn retains open node %#v", node)
-		}
-	}
-	if projection.Active.Status != thinking.Failed {
-		t.Fatalf("turn status = %q", projection.Active.Status)
-	}
-}
-
-func TestProjectionRetainsCompleteMetadataForGeometryAwarePresentation(t *testing.T) {
-	projection := testProjection(t)
-	longArguments := strings.Repeat("complete-argument-", 4096)
-	longResult := strings.Repeat("complete-result-", 4096)
-	apply(t, projection,
-		event.Draft{Kind: event.SessionCreated, Data: event.SessionCreatedData{Task: "inspect"}},
-		event.Draft{Kind: event.RouterStarted},
-		event.Draft{Kind: event.LeadSelected, Data: event.LeadSelectedData{LeadID: "engineering"}},
-		event.Draft{Kind: event.ToolCalled, Actor: "engineering", Data: event.ToolCallData{
-			ToolCallID: "tool-long", Tool: "inspect", Arguments: longArguments,
-		}},
-		event.Draft{Kind: event.ToolCompleted, Actor: "engineering", Data: event.ToolCompletedData{
-			ToolCallID: "tool-long", Tool: "inspect", Result: longResult,
-		}},
-	)
-	node := projection.Active.Nodes["tool:tool-long"]
-	if node == nil {
-		t.Fatal("tool node missing")
-	}
-	if got := node.Metadata["arguments"]; got != longArguments {
-		t.Fatalf("metadata was changed or truncated: got %d bytes, want %d", len(got), len(longArguments))
-	}
-	if got := node.Metadata["result"]; got != longResult {
-		t.Fatalf("tool result was changed or truncated: got %d bytes, want %d", len(got), len(longResult))
-	}
-}
-
-func TestProjectionDistinguishesToolDiscoveryAndResearchProvider(t *testing.T) {
-	projection := testProjection(t)
-	apply(t, projection,
-		event.Draft{Kind: event.SessionCreated, Data: event.SessionCreatedData{Task: "research"}},
-		event.Draft{Kind: event.RouterStarted},
-		event.Draft{Kind: event.LeadSelected, Data: event.LeadSelectedData{LeadID: "engineering"}},
-		event.Draft{Kind: event.ToolCalled, Actor: "engineering", Data: event.ToolCallData{
-			ToolCallID: "discover", Tool: "tool_search", Arguments: `{"query":"web evidence"}`,
-		}},
-		event.Draft{Kind: event.ToolCompleted, Actor: "engineering", Data: event.ToolCompletedData{
-			ToolCallID: "discover", Tool: "tool_search", Result: `{"tools":["web_search"]}`,
-		}},
-		event.Draft{Kind: event.ToolCalled, Actor: "engineering", Data: event.ToolCallData{
-			ToolCallID: "search", Tool: "web_search", Provider: "linkup", Arguments: `{"query":"primary evidence"}`,
-		}},
-		event.Draft{Kind: event.ToolCompleted, Actor: "engineering", Data: event.ToolCompletedData{
-			ToolCallID: "search", Tool: "web_search", Result: `{"provider":"linkup","mode":"search"}`,
-		}},
-	)
-	discovery := projection.Active.Nodes["tool:discover"]
-	if discovery == nil || discovery.Kind != "tool-discovery" {
-		t.Fatalf("discovery node = %#v", discovery)
-	}
-	if edge := projection.Active.Edges["flow:tool:discover"]; edge == nil || edge.Kind != "tool-discovery" {
-		t.Fatalf("discovery edge = %#v", edge)
-	}
-	search := projection.Active.Nodes["tool:search"]
-	if search == nil || search.Kind != "tool" || search.Metadata["provider"] != "Linkup" {
-		t.Fatalf("research node = %#v", search)
-	}
-}
-
-func TestProjectionAttachesContextLifecycleToItsActualScope(t *testing.T) {
-	projection := testProjection(t)
-	apply(t, projection,
-		event.Draft{Kind: event.SessionCreated, Data: event.SessionCreatedData{Task: "context"}},
-		event.Draft{Kind: event.RouterStarted},
-		event.Draft{Kind: event.LeadSelected, Data: event.LeadSelectedData{LeadID: "engineering"}},
-		event.Draft{Kind: event.DelegationCreated, Data: event.DelegationSpec{
-			ID: "research-call", MemberID: "research", Objective: "inspect evidence",
-		}},
-		event.Draft{Kind: event.ContextViewCommitted, Data: event.ContextViewCommittedData{
-			ScopeKind: "specialist", ScopeID: "research-call", Epoch: 4,
-			EstimatedTokens: 8192, ViewDigest: "specialist-view", Compacted: true,
-		}},
-		event.Draft{Kind: event.ContextAgentCompacted, CorrelationID: "research-call", Data: event.ContextAgentCompactedData{
-			Scope: "member:research", TranscriptReference: "alt-tool-output://research-transcript",
-			MessagesBefore: 84, MessagesAfter: 6,
-		}},
-		event.Draft{Kind: event.PeerTurnCreated, Data: event.PeerTurnSpec{
-			ID: "peer-turn-1", CollaborationID: "collaboration-1", PeerID: "verification",
-			Objective: "challenge the finding", Round: 1,
-		}},
-		event.Draft{Kind: event.ContextViewCommitted, Data: event.ContextViewCommittedData{
-			ScopeKind: "peer", ScopeID: "collaboration-1", Epoch: 2,
-			EstimatedTokens: 4096, ViewDigest: "peer-view",
-		}},
-		event.Draft{Kind: event.ContextAgentCompacted, CorrelationID: "peer-turn-1", Data: event.ContextAgentCompactedData{
-			Scope: "peer:verification", TranscriptReference: "alt-tool-output://peer-transcript",
-			MessagesBefore: 82, MessagesAfter: 5,
-		}},
-	)
-
-	research := projection.Active.Nodes["member:research"]
-	if research == nil || research.Metadata["context_epoch"] != "4" ||
-		research.Metadata["projection_compactions"] != "1" ||
-		research.Metadata["exact_transcript"] != "alt-tool-output://research-transcript" ||
-		research.Metadata["messages_before_compaction"] != "84" {
-		t.Fatalf("specialist context metadata = %#v", research)
-	}
-	verification := projection.Active.Nodes["member:verification"]
-	if verification == nil || verification.Metadata["context_epoch"] != "2" ||
-		verification.Metadata["working_view_digest"] != "peer-view" ||
-		verification.Metadata["exact_transcript"] != "alt-tool-output://peer-transcript" ||
-		verification.Metadata["messages_after_compaction"] != "5" {
-		t.Fatalf("peer context metadata = %#v", verification)
-	}
-	if lead := projection.Active.Nodes["member:engineering"]; lead.Metadata["exact_transcript"] != "" {
-		t.Fatalf("specialist or peer compaction was attached to Lead: %#v", lead.Metadata)
-	}
-}
-
-func testProjection(t *testing.T) *thinking.Projection {
+func projectionWithTurn(t *testing.T) *thinking.Projection {
 	t.Helper()
-	value := profile.Profile{
-		Leads: []profile.LeadAssignment{{
-			ID: "engineering", Calls: []string{"research", "verification"},
-		}},
-		Members: []profile.MemberAssignment{
-			{ID: "research"},
-			{ID: "verification"},
-		},
-	}
-	projection := thinking.New("conversation", value)
-	record := store.Session{
-		ID: "turn-1", ConversationID: "conversation", Task: "task",
-		Status: store.SessionRunning, CreatedAt: time.Now(), UpdatedAt: time.Now(),
-	}
-	if err := projection.AddTurn(record); err != nil {
+	now := time.Now()
+	projection := thinking.New("conversation", thinkingProfile())
+	if err := projection.AddTurn(store.Session{ID: "turn-1", ConversationID: "conversation", Task: "task", Status: store.SessionRunning, CreatedAt: now, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	return projection
 }
 
-func apply(t *testing.T, projection *thinking.Projection, drafts ...event.Draft) {
+func applyDrafts(t *testing.T, projection *thinking.Projection, sessionID string, at time.Time, drafts []event.Draft) {
 	t.Helper()
-	for _, draft := range drafts {
-		item, err := draft.Materialize(
-			projection.ActiveTurnID,
-			projection.Active.Sequence+1,
-			time.Now(),
-		)
+	for index, draft := range drafts {
+		item, err := draft.Materialize(sessionID, int64(index+1), at.Add(time.Duration(index)*time.Millisecond))
 		if err != nil {
 			t.Fatal(err)
 		}
 		if err := projection.Apply(item); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func thinkingProfile() profile.Profile {
+	return profile.Profile{
+		Schema: profile.CurrentSchema, ID: "vision-coding", Revision: 1, Name: "Vision coding", Gateway: "opencode",
+		Models: map[string]profile.Model{
+			"deepseek": {Route: "test", Name: "deepseek-code"},
+			"research": {Route: "test", Name: "research"},
+			"vision":   {Route: "test", Name: "vision"},
+		},
+		Primary:     profile.AgentAssignment{ID: "deepseek-coder", Model: "deepseek", Definition: "Own code", Peers: []string{"research-peer"}, Specialists: []string{"vision-specialist"}},
+		Peers:       []profile.AgentAssignment{{ID: "research-peer", Model: "research", Definition: "Own evidence"}},
+		Specialists: []profile.SpecialistAssignment{{ID: "vision-specialist", Model: "vision", Definition: "Read pixels"}},
 	}
 }

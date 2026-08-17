@@ -235,9 +235,12 @@ func (h *Host) exchange(request Request) Response {
 		}
 		if h.draft.Gateway != gateway {
 			h.draft.Gateway = gateway
-			h.draft.Router.Model = ModelChoice{}
-			for index := range h.draft.Members {
-				h.draft.Members[index].Model = ModelChoice{}
+			h.draft.Primary.Model = ModelChoice{}
+			for index := range h.draft.Peers {
+				h.draft.Peers[index].Model = ModelChoice{}
+			}
+			for index := range h.draft.Specialists {
+				h.draft.Specialists[index].Model = ModelChoice{}
 			}
 		}
 		h.initError = ""

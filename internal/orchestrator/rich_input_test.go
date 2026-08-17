@@ -59,7 +59,7 @@ func TestUnknownVisionCapabilityPreservesImageAndToolFallback(t *testing.T) {
 	registry := provider.NewRegistry()
 	runtime := newSessionRuntime(ledger, registry, session, document, nil)
 	runtime.engineOptions.ArtifactRoot = t.TempDir()
-	message, err := runtime.richUserMessage(ctx, "lead-model", "CURRENT STATE", []string{artifact.Reference})
+	message, err := runtime.richUserMessage(ctx, document.Profile.Primary.Model, "CURRENT STATE", []string{artifact.Reference})
 	if err != nil {
 		t.Fatal(err)
 	}

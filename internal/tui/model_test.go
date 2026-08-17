@@ -166,7 +166,7 @@ func TestCodexVisualContractAtRest(t *testing.T) {
 			t.Fatalf("Codex-derived visual contract is missing %q:\n%s", expected, rendered)
 		}
 	}
-	for _, obsolete := range []string{"ALT‑V1  profile", "The right Lead", "Orchestration"} {
+	for _, obsolete := range []string{"ALT‑V1  profile", "The right leader", "Orchestration"} {
 		if strings.Contains(rendered, obsolete) {
 			t.Fatalf("obsolete ALT chrome %q remains:\n%s", obsolete, rendered)
 		}
@@ -316,7 +316,7 @@ func TestContextLifecycleIsVisibleWithoutExposingArchivedTranscript(t *testing.T
 	view, err := (event.Draft{
 		Kind: event.ContextViewCommitted,
 		Data: event.ContextViewCommittedData{
-			ScopeKind: "lead", ScopeID: "engineering", Epoch: 3,
+			ScopeKind: "agent", ScopeID: "engineering", Epoch: 3,
 			EstimatedTokens: 12000, ViewDigest: "view-digest", Compacted: true,
 		},
 	}).Materialize("turn-context", 1, time.Now())
@@ -328,7 +328,7 @@ func TestContextLifecycleIsVisibleWithoutExposingArchivedTranscript(t *testing.T
 	agent, err := (event.Draft{
 		Kind: event.ContextAgentCompacted, CorrelationID: "engineering",
 		Data: event.ContextAgentCompactedData{
-			Scope: "lead:engineering", TranscriptReference: "alt-tool-output://private",
+			Scope: "agent:engineering", TranscriptReference: "alt-tool-output://private",
 			MessagesBefore: 91, MessagesAfter: 7,
 		},
 	}).Materialize("turn-context", 2, time.Now())
@@ -342,7 +342,7 @@ func TestContextLifecycleIsVisibleWithoutExposingArchivedTranscript(t *testing.T
 		t.Fatalf("compactions = %d, want 2", current.compactions)
 	}
 	timeline := strings.Join(current.timeline, "\n")
-	for _, expected := range []string{"Context compacted for lead:engineering", "91 → 7 messages", "exact transcript retained"} {
+	for _, expected := range []string{"Context compacted for agent:engineering", "91 → 7 messages", "exact transcript retained"} {
 		if !strings.Contains(timeline, expected) {
 			t.Fatalf("timeline omitted %q:\n%s", expected, timeline)
 		}
@@ -570,8 +570,8 @@ func TestCodexActivityCellsPreserveALTOrchestration(t *testing.T) {
 	sessionID := "visual-activity"
 	drafts := []event.Draft{
 		{Kind: event.SessionCreated, Actor: "user", Data: event.SessionCreatedData{Task: "Repair the parser."}},
-		{Kind: event.LeadSelected, Actor: "router", Data: event.LeadSelectedData{LeadID: "engineering", Basis: "The requested result is a code repair."}},
-		{Kind: event.DelegationCreated, Actor: "engineering", Data: event.DelegationSpec{MemberID: "research", Objective: "Verify the grammar contract."}},
+		{Kind: event.LeadershipTransferred, Actor: "system", Data: event.LeadershipTransferredData{ToAgentID: "engineering", Reason: "Every user turn enters through the primary."}},
+		{Kind: event.DelegationCreated, Actor: "engineering", Data: event.DelegationSpec{CallerID: "engineering", SpecialistID: "research", Objective: "Verify the grammar contract."}},
 		{Kind: event.ToolCalled, Actor: "engineering", Data: event.ToolCallData{ToolCallID: "tool-1", Tool: "exec_command", Arguments: `{"cmd":"go test ./..."}`}},
 		{Kind: event.ToolCompleted, Actor: "engineering", Data: event.ToolCompletedData{ToolCallID: "tool-1", Tool: "exec_command", Result: `{"output":"ok","running":false,"exit_code":0}`}},
 		{Kind: event.FinalStarted, Actor: "engineering"},
@@ -588,13 +588,13 @@ func TestCodexActivityCellsPreserveALTOrchestration(t *testing.T) {
 	rendered := ansi.Strip(model.View().Content)
 	for _, expected := range []string{
 		"› Repair the parser.",
-		"• Routed to engineering",
-		"└ The requested result is a code repair.",
-		"• Delegated to research",
+		"• Entered through engineering",
+		"└ Every user turn enters through the primary.",
+		"• Called specialist research",
 		"└ Verify the grammar contract.",
 		"• Ran go test ./...",
 		"└ ok",
-		"• Lead synthesis started",
+		"• engineering answering",
 		"Implemented and verified.",
 		"─ Worked for 6s",
 	} {
@@ -885,7 +885,7 @@ func TestCompletionNotifiesOnlyWhenTerminalIsUnfocusedAndNoQueueRemains(t *testi
 	model.turns = []turnView{{sessionID: sessionID, status: "running"}}
 	model.currentTurn = 0
 	completed, err := (event.Draft{
-		Kind: event.FinalCompleted, Actor: "lead",
+		Kind: event.FinalCompleted, Actor: "agent",
 		Data: event.FinalCompletedData{Answer: "Finished in the background."},
 	}).Materialize(sessionID, 1, time.Now())
 	if err != nil {
@@ -920,7 +920,7 @@ func TestReplayReconstructsUserPromptAndMarkdownAnswer(t *testing.T) {
 	}
 	completed, err := (event.Draft{
 		Kind:  event.FinalCompleted,
-		Actor: "lead",
+		Actor: "agent",
 		Data:  event.FinalCompletedData{Answer: "**Done.**"},
 	}).Materialize(sessionID, 2, time.Now())
 	if err != nil {
@@ -953,7 +953,7 @@ func TestReplaySeparatesDurableConversationTurns(t *testing.T) {
 			t.Fatal(err)
 		}
 		completed, err := (event.Draft{
-			Kind: event.FinalCompleted, Actor: "lead",
+			Kind: event.FinalCompleted, Actor: "agent",
 			Data: event.FinalCompletedData{Answer: "Answer " + task},
 		}).Materialize(sessionID, 2, now.Add(time.Duration(index)*time.Second))
 		if err != nil {
@@ -1134,11 +1134,11 @@ func TestTimelineProjectionDoesNotSilentlyDiscardOlderEvents(t *testing.T) {
 	const count = 620
 	for index := 0; index < count; index++ {
 		item, err := (event.Draft{
-			Kind:  event.LeadSelected,
-			Actor: "router",
-			Data: event.LeadSelectedData{
-				LeadID: "engineering",
-				Basis:  fmt.Sprintf("selection %03d", index),
+			Kind:  event.LeadershipTransferred,
+			Actor: "system",
+			Data: event.LeadershipTransferredData{
+				ToAgentID: "engineering",
+				Reason:    fmt.Sprintf("ingress %03d", index),
 			},
 		}).Materialize("large-timeline", int64(index+2), now)
 		if err != nil {
@@ -1149,7 +1149,7 @@ func TestTimelineProjectionDoesNotSilentlyDiscardOlderEvents(t *testing.T) {
 	if got := len(model.current().timeline); got != count {
 		t.Fatalf("timeline retained %d/%d event projections", got, count)
 	}
-	if !strings.Contains(model.current().timeline[0], "selection 000") {
+	if !strings.Contains(model.current().timeline[0], "ingress 000") {
 		t.Fatalf("oldest timeline item was replaced: %q", model.current().timeline[0])
 	}
 }
@@ -1295,7 +1295,7 @@ func TestPersistedSteerDoesNotDuplicateOptimisticUserCell(t *testing.T) {
 	}
 }
 
-func TestLeadTurnBoundaryClearsConsumedSteerPreview(t *testing.T) {
+func TestAgentTurnBoundaryClearsConsumedSteerPreview(t *testing.T) {
 	model, closeApp := testModel(t)
 	defer closeApp()
 	sessionID := "active-turn"
@@ -1303,9 +1303,9 @@ func TestLeadTurnBoundaryClearsConsumedSteerPreview(t *testing.T) {
 	model.currentTurn = 0
 	model.pendingSteers = []string{"Focus on recovery."}
 	started, err := (event.Draft{
-		Kind: event.LeadTurnStarted, Actor: "lead",
-		Data: event.LeadTurnData{
-			Turn: 2, SignalKinds: []string{string(event.UserInstruction)},
+		Kind: event.AgentTurnStarted, Actor: "deepseek-coder",
+		Data: event.AgentTurnData{
+			AgentID: "deepseek-coder", Turn: 2, SignalKinds: []string{string(event.UserInstruction)},
 		},
 	}).Materialize(sessionID, 1, time.Now())
 	if err != nil {
